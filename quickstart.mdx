@@ -1,80 +1,459 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart Guide
+description: Get up and running with Key Management Service in minutes. Learn how to set up the service, generate encryption keys, and perform your first encryption operation.
 ---
 
-## Get started in three steps
+## Getting Started
 
-Get your documentation site running locally and make your first customization.
+This guide will walk you through setting up the Key Management Service and making your first API calls. You'll learn how to generate encryption keys, encrypt data, and verify encrypted credentials.
 
-### Step 1: Set up your local environment
+<Steps>
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+### Prerequisites
 
-### Step 2: Deploy your changes
+Before you begin, ensure you have:
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+- Node.js 20.x or higher
+- PostgreSQL database
+- yarn or npm package manager
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+### Clone and Install
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+Clone the repository and install dependencies:
 
-### Step 3: Go live
+<CodeGroup>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+```bash npm
+npm install
+```
 
-## Next steps
+```bash yarn
+yarn install
+```
 
-Now that you have your docs running, explore these key features:
+</CodeGroup>
 
-<CardGroup cols={2}>
+The project includes the following key dependencies:
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+- `@nestjs/graphql` - GraphQL integration
+- `@nestjs/apollo` - Apollo Server driver
+- `@prisma/client` - Database ORM
+- `@nestjs/config` - Configuration management
+- `@nestjs/schedule` - Cron job scheduling
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+### Configure Database
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+Create a `.env` file in the project root with your database connection:
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
+```bash .env
+DATABASE_URL="postgresql://user:password@localhost:5432/kms_db"
 
-</CardGroup>
+# Optional: Customize key rotation and retention policies
+ENCRYPTION_KEY_ROTATION_DAYS=30
+ENCRYPTION_KEY_RETENTION_DAYS=90
+MAX_ENCRYPTED_DATA_SIZE=2048
+```
+
+<Info>
+  **Key Configuration Options:**
+  - `ENCRYPTION_KEY_ROTATION_DAYS` - How long before keys expire (default: 30 days)
+  - `ENCRYPTION_KEY_RETENTION_DAYS` - How long to keep deprecated keys (default: 90 days)
+  - `MAX_ENCRYPTED_DATA_SIZE` - Maximum size of encrypted data in bytes (default: 2048)
+</Info>
+
+Run Prisma migrations to set up the database schema:
+
+```bash
+npx prisma migrate dev
+```
+
+This creates three tables:
+- `User` - User accounts with encrypted credentials
+- `ClientEncryptionKey` - RSA key pairs with rotation metadata
+- `EncryptionMetric` - Operation metrics for monitoring
+
+### Start the Service
+
+Run the development server:
+
+<CodeGroup>
+
+```bash Development
+npm run start:dev
+```
+
+```bash Production
+npm run build
+npm run start:prod
+```
+
+</CodeGroup>
+
+The GraphQL API will be available at `http://localhost:3000/graphql`
+
+<Tip>
+  The GraphQL Playground is automatically enabled in development mode, allowing you to explore the API and test queries interactively.
+</Tip>
+
+### Generate Your First Encryption Key
+
+Now let's generate an encryption key for a device. Open the GraphQL Playground at `http://localhost:3000/graphql` and run:
+
+```graphql
+mutation {
+  generateClientEncryptionKey(
+    input: {
+      deviceId: "device_123"
+      appVersion: "1.0.0"
+    }
+  ) {
+    keyId
+    publicKey
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "data": {
+    "generateClientEncryptionKey": {
+      "keyId": "key_1709514240000_a1b2c3d4e5f6g7h8i9j0",
+      "publicKey": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...\n-----END PUBLIC KEY-----\n"
+    }
+  }
+}
+```
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  The `keyId` is unique and includes a timestamp plus random bytes. Store this `keyId` and `publicKey` in your client application - you'll need them for encryption operations.
 </Note>
+
+### Encrypt Data on the Client
+
+With the public key from step 5, you can now encrypt sensitive data on your client. Here's how the encryption works:
+
+```typescript Client-side encryption
+import * as crypto from 'crypto';
+
+function encryptData(data: string, publicKey: string): string {
+  const buffer = Buffer.from(data, 'utf-8');
+  const encrypted = crypto.publicEncrypt(
+    {
+      key: publicKey,
+      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+    },
+    buffer,
+  );
+  return encrypted.toString('base64');
+}
+
+// Encrypt a passcode
+const publicKey = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n";
+const encryptedPasscode = encryptData("123456", publicKey);
+```
+
+<Warning>
+  **Security Best Practice:** Always encrypt sensitive data (passcodes, PINs, tokens) on the client side before sending to any server. The private key never leaves the KMS server.
+</Warning>
+
+### Set an Encrypted Passcode
+
+Once you have encrypted data, you can store it securely. Here's how to set a user passcode:
+
+```graphql
+mutation {
+  setUserPasscode(
+    input: {
+      encryptedPasscode: "base64_encrypted_data_here"
+      keyId: "key_1709514240000_a1b2c3d4e5f6g7h8i9j0"
+      passwordAuthType: PASSCODE
+    }
+  )
+}
+```
+
+**Response:**
+
+```json
+{
+  "data": {
+    "setUserPasscode": true
+  }
+}
+```
+
+The service will:
+1. Retrieve the private key using the `keyId`
+2. Decrypt the encrypted passcode
+3. Hash it with bcrypt
+4. Store the hash in the database
+
+<Info>
+  **Source:** This operation is handled by `AuthService.setUserPasscode()` in `src/auth/auth.service.ts`
+</Info>
+
+### Verify an Encrypted Passcode
+
+To verify a passcode later, encrypt it with the same public key and verify:
+
+```graphql
+mutation {
+  verifyUserPasscode(
+    input: {
+      encryptedPasscode: "base64_encrypted_data_here"
+      keyId: "key_1709514240000_a1b2c3d4e5f6g7h8i9j0"
+      passwordAuthType: PASSCODE
+    }
+  )
+}
+```
+
+**Response:**
+
+```json
+{
+  "data": {
+    "verifyUserPasscode": true
+  }
+}
+```
+
+### Rotate Keys (Optional)
+
+Keys automatically expire after 30 days (configurable). To manually rotate a device's key:
+
+```graphql
+mutation {
+  rotateClientEncryptionKey(
+    input: {
+      deviceId: "device_123"
+    }
+  ) {
+    keyId
+    publicKey
+  }
+}
+```
+
+This will:
+- Mark all existing keys for the device as deprecated
+- Generate a new key pair
+- Return the new public key and keyId
+
+<Tip>
+  Old keys are retained for 90 days (configurable) so data encrypted with them can still be decrypted during the transition period.
+</Tip>
+
+### Monitor Encryption Metrics
+
+Check operation metrics to monitor system health:
+
+```graphql
+query {
+  getEncryptionMetricsSummary(timeframeHours: 24)
+}
+```
+
+**Response:**
+
+```json
+{
+  "data": {
+    "getEncryptionMetricsSummary": "{\n  \"generate\": {\n    \"success\": 145,\n    \"failure\": 2\n  },\n  \"decrypt\": {\n    \"success\": 1203,\n    \"failure\": 15\n  }\n}"
+  }
+}
+```
+
+</Steps>
+
+## Complete Example Flow
+
+Here's a complete TypeScript example showing the entire flow:
+
+```typescript Complete client example
+import { ApolloClient, InMemoryCache, gql } from '@apollo/client';
+import * as crypto from 'crypto';
+
+const client = new ApolloClient({
+  uri: 'http://localhost:3000/graphql',
+  cache: new InMemoryCache(),
+});
+
+// Step 1: Generate encryption key
+const GENERATE_KEY = gql`
+  mutation GenerateKey($deviceId: String!, $appVersion: String) {
+    generateClientEncryptionKey(
+      input: { deviceId: $deviceId, appVersion: $appVersion }
+    ) {
+      keyId
+      publicKey
+    }
+  }
+`;
+
+const { data } = await client.mutate({
+  mutation: GENERATE_KEY,
+  variables: {
+    deviceId: 'device_123',
+    appVersion: '1.0.0',
+  },
+});
+
+const { keyId, publicKey } = data.generateClientEncryptionKey;
+
+// Step 2: Encrypt sensitive data on client
+function encryptData(data: string, publicKey: string): string {
+  const buffer = Buffer.from(data, 'utf-8');
+  const encrypted = crypto.publicEncrypt(
+    {
+      key: publicKey,
+      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+    },
+    buffer,
+  );
+  return encrypted.toString('base64');
+}
+
+const userPasscode = '123456';
+const encryptedPasscode = encryptData(userPasscode, publicKey);
+
+// Step 3: Set encrypted passcode
+const SET_PASSCODE = gql`
+  mutation SetPasscode(
+    $encryptedPasscode: String!
+    $keyId: String!
+  ) {
+    setUserPasscode(
+      input: {
+        encryptedPasscode: $encryptedPasscode
+        keyId: $keyId
+        passwordAuthType: PASSCODE
+      }
+    )
+  }
+`;
+
+await client.mutate({
+  mutation: SET_PASSCODE,
+  variables: {
+    encryptedPasscode,
+    keyId,
+  },
+});
+
+console.log('Passcode set successfully!');
+
+// Step 4: Verify passcode later
+const VERIFY_PASSCODE = gql`
+  mutation VerifyPasscode(
+    $encryptedPasscode: String!
+    $keyId: String!
+  ) {
+    verifyUserPasscode(
+      input: {
+        encryptedPasscode: $encryptedPasscode
+        keyId: $keyId
+        passwordAuthType: PASSCODE
+      }
+    )
+  }
+`;
+
+const verifyResult = await client.mutate({
+  mutation: VERIFY_PASSCODE,
+  variables: {
+    encryptedPasscode: encryptData('123456', publicKey),
+    keyId,
+  },
+});
+
+console.log('Verification:', verifyResult.data.verifyUserPasscode);
+```
+
+## Available Operations
+
+The service provides these GraphQL operations:
+
+### Mutations
+
+| Operation | Description |
+|-----------|-------------|
+| `generateClientEncryptionKey` | Generate a new RSA key pair for a device |
+| `rotateClientEncryptionKey` | Rotate keys for a device (deprecates old keys) |
+| `encryptDataLikeClient` | Test encryption with a public key (utility) |
+| `setUserPasscode` | Set a user's encrypted passcode |
+| `verifyUserPasscode` | Verify a user's encrypted passcode |
+| `setTransactionPin` | Set a user's encrypted transaction PIN |
+| `verifyTransactionPin` | Verify a user's encrypted transaction PIN |
+
+### Queries
+
+| Operation | Description |
+|-----------|-------------|
+| `getEncryptionMetricsSummary` | Get operation metrics for a time window |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card
+    title="API Reference"
+    icon="book"
+    href="/api/overview"
+  >
+    Explore detailed API documentation with all parameters and responses
+  </Card>
+  <Card
+    title="Security Guide"
+    icon="shield"
+    href="/concepts/security"
+  >
+    Learn about security best practices and encryption standards
+  </Card>
+  <Card
+    title="Key Rotation"
+    icon="rotate"
+    href="/concepts/key-rotation"
+  >
+    Understand automatic key lifecycle management
+  </Card>
+  <Card
+    title="Monitoring"
+    icon="chart-line"
+    href="/guides/monitoring"
+  >
+    Set up metrics collection and alerting
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+### Key Generation Fails
+
+<Warning>
+  **Rate Limit Exceeded**: Each device can generate maximum 5 keys per 24-hour window. Wait or use an existing valid key.
+</Warning>
+
+### Decryption Fails
+
+- Verify the `keyId` matches the one used for encryption
+- Check if the key has expired (keys expire after 30 days by default)
+- Ensure encrypted data is properly base64 encoded
+
+### Database Connection Issues
+
+Verify your `DATABASE_URL` in `.env`:
+
+```bash
+npx prisma db push
+```
+
+This will test the connection and sync the schema.
+
+## Support
+
+For issues or questions:
+- Check the [API Reference](/api/overview) for detailed documentation
+- Review [Security Best Practices](/concepts/security)
+- File an issue on GitHub

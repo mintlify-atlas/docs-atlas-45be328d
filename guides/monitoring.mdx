@@ -1,0 +1,588 @@
+---
+title: Monitoring Guide
+description: Learn how to monitor encryption operations, track metrics, and identify problematic keys
+---
+
+This guide covers the monitoring and metrics system for tracking encryption operations, analyzing failure rates, and maintaining system health.
+
+## Overview
+
+The KMS includes a comprehensive monitoring service that tracks:
+- **Key generation** events and success rates
+- **Encryption** operations (client-side testing)
+- **Decryption** operations and failures
+- **Performance metrics** (operation duration)
+- **Error patterns** and failure reasons
+
+## Metrics Collection
+
+The `EncryptionMonitoringService` automatically records metrics for all encryption operations:
+
+```typescript
+// From: src/encryption/encryption-monitoring.service.ts:13-47
+/**
+ * Record metrics for encryption operations
+ */
+async recordMetric(
+  operation: 'encrypt' | 'decrypt' | 'generate',
+  status: 'success' | 'failure',
+  {
+    keyId = null,
+    deviceId = null,
+    errorReason = null,
+    duration = 0,
+  }: {
+    keyId?: string | null;
+    deviceId?: string | null;
+    errorReason?: string | null;
+    duration?: number;
+  } = {},
+): Promise<void> {
+  try {
+    await this.prismaService.encryptionMetric.create({
+      data: {
+        keyId,
+        deviceId,
+        operation,
+        status,
+        errorReason,
+        duration,
+        timestamp: new Date(),
+      },
+    });
+  } catch (error) {
+    // Log but don't throw - metrics should not break main functionality
+    this.logger.error(
+      `Failed to record encryption metric: ${error.message}`,
+      error.stack,
+    );
+  }
+}
+```
+
+## Automatic Metric Recording
+
+Metrics are automatically recorded in the encryption resolver:
+
+```typescript
+// From: src/encryption/encryption.resolver.ts:25-56
+@Mutation(() => EncryptionKeyOutput)
+async generateClientEncryptionKey(
+  @Args('input') input: ClientIdentityInput,
+): Promise<EncryptionKeyOutput> {
+  const startTime = Date.now();
+  const { deviceId, appVersion } = input;
+
+  try {
+    const result = await this.encryptionService.generateClientEncryptionKey(
+      deviceId,
+      appVersion,
+    );
+
+    // Record metric
+    await this.monitoringService.recordMetric('generate', 'success', {
+      deviceId,
+      keyId: result.keyId,
+      duration: Date.now() - startTime,
+    });
+
+    return result;
+  } catch (error) {
+    // Record failure metric
+    await this.monitoringService.recordMetric('generate', 'failure', {
+      deviceId,
+      errorReason: error.message,
+      duration: Date.now() - startTime,
+    });
+
+    throw error;
+  }
+}
+```
+
+## Metrics Summary Query
+
+### GraphQL Query
+
+Retrieve a comprehensive metrics summary for a specific timeframe:
+
+```graphql
+query GetMetrics {
+  getEncryptionMetricsSummary(timeframeHours: 24)
+}
+```
+
+### Query Parameters
+
+- `timeframeHours` (optional): Number of hours to analyze (default: 24)
+
+### Response Format
+
+The query returns a JSON string containing:
+
+```json
+{
+  "metrics": [
+    {
+      "operation": "generate",
+      "status": "success",
+      "count": "150",
+      "avg_duration": 45.2
+    },
+    {
+      "operation": "decrypt",
+      "status": "success",
+      "count": "523",
+      "avg_duration": 12.8
+    },
+    {
+      "operation": "decrypt",
+      "status": "failure",
+      "count": "7",
+      "avg_duration": 8.3
+    }
+  ],
+  "failureRates": [
+    {
+      "operation": "generate",
+      "failure_rate": 1.2
+    },
+    {
+      "operation": "decrypt",
+      "failure_rate": 1.3
+    }
+  ],
+  "topFailures": [
+    {
+      "operation": "decrypt",
+      "reason": "Encryption key has expired",
+      "count": "5"
+    },
+    {
+      "operation": "decrypt",
+      "reason": "Encryption key not found",
+      "count": "2"
+    }
+  ],
+  "timeframeHours": 24
+}
+```
+
+## Metrics Summary Implementation
+
+```typescript
+// From: src/encryption/encryption-monitoring.service.ts:52-107
+async generateMetricsSummary(timeframeHours: number = 24): Promise<any> {
+  const timeThreshold = new Date();
+  timeThreshold.setHours(timeThreshold.getHours() - timeframeHours);
+
+  try {
+    // Get total counts by operation and status
+    const metrics = await this.prismaService.$queryRaw`
+      SELECT 
+        operation, 
+        status, 
+        COUNT(*) as count,
+        AVG(duration) as avg_duration
+      FROM "EncryptionMetric"
+      WHERE timestamp >= ${timeThreshold}
+      GROUP BY operation, status
+    `;
+
+    // Get failure rates
+    const failureRates = await this.prismaService.$queryRaw`
+      SELECT 
+        operation,
+        SUM(CASE WHEN status = 'failure' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as failure_rate
+      FROM "EncryptionMetric"
+      WHERE timestamp >= ${timeThreshold}
+      GROUP BY operation
+    `;
+
+    // Top failure reasons
+    const topFailures = await this.prismaService.$queryRaw<
+      { operation: string; reason: string; count: bigint }[]
+    >`
+  SELECT 
+    operation,
+    "errorReason" AS reason,  
+    COUNT(*) AS count
+  FROM "EncryptionMetric"
+  WHERE status = 'failure' AND timestamp >= ${timeThreshold}
+  GROUP BY operation, "errorReason"
+  ORDER BY count DESC
+  LIMIT 10;
+`;
+
+    return {
+      metrics,
+      failureRates,
+      topFailures,
+      timeframeHours,
+    };
+  } catch (error) {
+    this.logger.error(
+      `Failed to generate metrics summary: ${error.message}`,
+      error.stack,
+    );
+    throw new Error('Failed to generate encryption metrics summary');
+  }
+}
+```
+
+## Finding Problematic Keys
+
+Identify keys with high failure rates that may need rotation:
+
+```typescript
+// From: src/encryption/encryption-monitoring.service.ts:112-141
+async findProblematicKeys(
+  failureThresholdPercent: number = 10,
+): Promise<string[]> {
+  try {
+    const problematicKeys: any = await this.prismaService.$queryRaw`
+      WITH key_stats AS (
+        SELECT 
+          key_id,
+          SUM(CASE WHEN status = 'failure' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as failure_rate,
+          COUNT(*) as total_operations
+        FROM "EncryptionMetric"
+        WHERE key_id IS NOT NULL AND operation = 'decrypt'
+        GROUP BY key_id
+        HAVING COUNT(*) >= 5  -- Minimum number of operations to consider
+      )
+      SELECT key_id
+      FROM key_stats
+      WHERE failure_rate >= ${failureThresholdPercent}
+      ORDER BY failure_rate DESC, total_operations DESC
+    `;
+
+    return problematicKeys.map((k) => k.key_id);
+  } catch (error) {
+    this.logger.error(
+      `Failed to find problematic keys: ${error.message}`,
+      error.stack,
+    );
+    return [];
+  }
+}
+```
+
+This identifies keys where:
+- At least 5 decryption operations have been attempted
+- Failure rate exceeds the threshold (default: 10%)
+
+## Monitoring Workflow
+
+<Steps>
+  <Step title="Query metrics summary">
+    Retrieve metrics for the desired timeframe:
+
+    ```graphql
+    query {
+      getEncryptionMetricsSummary(timeframeHours: 24)
+    }
+    ```
+  </Step>
+
+  <Step title="Analyze failure rates">
+    Check the `failureRates` array to identify operations with high failure rates.
+  </Step>
+
+  <Step title="Review top failures">
+    Examine `topFailures` to understand common error patterns.
+  </Step>
+
+  <Step title="Identify problematic keys">
+    Use the monitoring service to find keys that need rotation (programmatically).
+  </Step>
+
+  <Step title="Take action">
+    - Rotate keys with high failure rates
+    - Investigate systemic issues
+    - Alert on threshold breaches
+  </Step>
+</Steps>
+
+## Metrics Database Schema
+
+```prisma
+model EncryptionMetric {
+  id           String   @id @default(uuid())
+  keyId        String?  @map("key_id")
+  deviceId     String?  @map("device_id")
+  operation    String   // 'encrypt' | 'decrypt' | 'generate'
+  status       String   // 'success' | 'failure'
+  errorReason  String?  @map("error_reason")
+  duration     Int      // Operation duration in milliseconds
+  timestamp    DateTime @default(now())
+
+  @@index([timestamp])
+  @@index([keyId])
+  @@index([operation, status])
+  @@map("EncryptionMetric")
+}
+```
+
+## Example Monitoring Dashboard
+
+<CodeGroup>
+```typescript Fetch Metrics
+async function fetchMetrics(hours: number = 24) {
+  const response = await fetch('/graphql', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      query: `
+        query GetMetrics($hours: Float!) {
+          getEncryptionMetricsSummary(timeframeHours: $hours)
+        }
+      `,
+      variables: { hours }
+    })
+  });
+
+  const { data } = await response.json();
+  const metrics = JSON.parse(data.getEncryptionMetricsSummary);
+  
+  return metrics;
+}
+
+// Usage
+const metrics = await fetchMetrics(24);
+console.log('Metrics:', metrics.metrics);
+console.log('Failure Rates:', metrics.failureRates);
+console.log('Top Failures:', metrics.topFailures);
+```
+
+```typescript React Component
+import { useEffect, useState } from 'react';
+
+interface MetricsSummary {
+  metrics: Array<{
+    operation: string;
+    status: string;
+    count: string;
+    avg_duration: number;
+  }>;
+  failureRates: Array<{
+    operation: string;
+    failure_rate: number;
+  }>;
+  topFailures: Array<{
+    operation: string;
+    reason: string;
+    count: string;
+  }>;
+  timeframeHours: number;
+}
+
+export function MetricsDashboard() {
+  const [metrics, setMetrics] = useState<MetricsSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function loadMetrics() {
+      const response = await fetch('/graphql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: `
+            query {
+              getEncryptionMetricsSummary(timeframeHours: 24)
+            }
+          `
+        })
+      });
+
+      const { data } = await response.json();
+      const summary = JSON.parse(data.getEncryptionMetricsSummary);
+      setMetrics(summary);
+      setLoading(false);
+    }
+
+    loadMetrics();
+    const interval = setInterval(loadMetrics, 60000); // Refresh every minute
+    
+    return () => clearInterval(interval);
+  }, []);
+
+  if (loading) return <div>Loading metrics...</div>;
+  if (!metrics) return <div>No metrics available</div>;
+
+  return (
+    <div>
+      <h2>Encryption Metrics (Last {metrics.timeframeHours}h)</h2>
+      
+      <section>
+        <h3>Operations Summary</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Operation</th>
+              <th>Status</th>
+              <th>Count</th>
+              <th>Avg Duration (ms)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {metrics.metrics.map((m, i) => (
+              <tr key={i}>
+                <td>{m.operation}</td>
+                <td>{m.status}</td>
+                <td>{m.count}</td>
+                <td>{m.avg_duration.toFixed(2)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+
+      <section>
+        <h3>Failure Rates</h3>
+        <ul>
+          {metrics.failureRates.map((fr, i) => (
+            <li key={i}>
+              {fr.operation}: {fr.failure_rate.toFixed(2)}%
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section>
+        <h3>Top Failures</h3>
+        <ul>
+          {metrics.topFailures.map((tf, i) => (
+            <li key={i}>
+              {tf.operation} - {tf.reason}: {tf.count} times
+            </li>
+          ))}
+        </ul>
+      </section>
+    </div>
+  );
+}
+```
+</CodeGroup>
+
+## Alerting Strategies
+
+### Failure Rate Alerts
+
+```typescript
+async function checkFailureRates() {
+  const metrics = await fetchMetrics(1); // Last hour
+  
+  for (const rate of metrics.failureRates) {
+    if (rate.failure_rate > 5) {
+      await sendAlert({
+        severity: 'warning',
+        message: `High failure rate for ${rate.operation}: ${rate.failure_rate.toFixed(2)}%`,
+        timeframe: '1 hour'
+      });
+    }
+    
+    if (rate.failure_rate > 10) {
+      await sendAlert({
+        severity: 'critical',
+        message: `Critical failure rate for ${rate.operation}: ${rate.failure_rate.toFixed(2)}%`,
+        timeframe: '1 hour'
+      });
+    }
+  }
+}
+```
+
+### Performance Degradation Alerts
+
+```typescript
+async function checkPerformance() {
+  const metrics = await fetchMetrics(1);
+  
+  for (const metric of metrics.metrics) {
+    if (metric.operation === 'decrypt' && metric.avg_duration > 50) {
+      await sendAlert({
+        severity: 'warning',
+        message: `Slow decryption performance: ${metric.avg_duration.toFixed(2)}ms average`,
+        timeframe: '1 hour'
+      });
+    }
+  }
+}
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Regular Monitoring" icon="clock">
+    Query metrics at regular intervals (e.g., every 5 minutes) to detect issues early.
+  </Card>
+  
+  <Card title="Failure Thresholds" icon="gauge">
+    Set appropriate thresholds for alerts (e.g., >5% warning, >10% critical).
+  </Card>
+  
+  <Card title="Key Rotation" icon="rotate">
+    Automatically rotate keys with consistently high failure rates.
+  </Card>
+  
+  <Card title="Trend Analysis" icon="chart-line">
+    Compare metrics across different timeframes to identify trends.
+  </Card>
+</CardGroup>
+
+## Common Failure Reasons
+
+| Error Reason | Description | Action |
+|--------------|-------------|--------|
+| `Encryption key has expired` | Key exceeded its 30-day lifetime | Rotate the key |
+| `Encryption key not found` | Key was deleted or never existed | Generate new key |
+| `key_retrieval_failed` | Database error retrieving key | Check database connectivity |
+| `Failed to decrypt data` | Corrupted data or wrong key | Verify keyId matches |
+| `Encrypted data size exceeds limit` | Payload too large | Reduce data size |
+
+## Performance Metrics
+
+### Normal Operation Ranges
+
+- **Key Generation**: 30-100ms
+- **Encryption** (client-side): 1-5ms
+- **Decryption** (server-side): 5-20ms
+
+If averages exceed these ranges, investigate:
+- Database performance
+- Server CPU usage
+- Network latency
+- Large payload sizes
+
+## Metrics Retention
+
+Consider implementing a retention policy for metrics:
+
+```typescript
+// Example: Delete metrics older than 90 days
+async function cleanupOldMetrics() {
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - 90);
+
+  await prismaService.encryptionMetric.deleteMany({
+    where: {
+      timestamp: {
+        lt: cutoffDate
+      }
+    }
+  });
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Key Generation" href="/guides/key-generation" icon="key">
+    Learn about key generation and rotation
+  </Card>
+  
+  <Card title="Authentication" href="/guides/authentication" icon="user-shield">
+    Implement secure authentication workflows
+  </Card>
+</CardGroup>

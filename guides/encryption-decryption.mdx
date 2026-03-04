@@ -1,0 +1,563 @@
+---
+title: Encryption & Decryption Guide
+description: Learn how to encrypt data on the client-side and decrypt it securely on the server using RSA asymmetric encryption
+---
+
+This guide demonstrates the complete encryption and decryption workflow using RSA-2048 asymmetric encryption with PKCS1_OAEP padding.
+
+## Overview
+
+The Key Management Service uses asymmetric encryption:
+- **Client-side**: Encrypts sensitive data using the public key
+- **Server-side**: Decrypts data using the corresponding private key
+- **Algorithm**: RSA-2048 with PKCS1_OAEP padding
+- **Encoding**: Base64 for transport
+
+## Encryption/Decryption Flow
+
+<Steps>
+  <Step title="Obtain public key">
+    Generate or retrieve an encryption key pair:
+
+    ```graphql
+    mutation {
+      generateClientEncryptionKey(input: {
+        deviceId: "device-12345"
+        appVersion: "1.0.0"
+      }) {
+        publicKey
+        keyId
+      }
+    }
+    ```
+  </Step>
+
+  <Step title="Encrypt data client-side">
+    Use the public key to encrypt sensitive data before transmission:
+
+    ```typescript
+    const encryptedData = encryptData(sensitiveData, publicKey);
+    ```
+  </Step>
+
+  <Step title="Send encrypted data to server">
+    Transmit the encrypted data along with the keyId:
+
+    ```graphql
+    mutation {
+      setUserPasscode(input: {
+        encryptedPasscode: encryptedData
+        keyId: "key_1234567890_abc123"
+      })
+    }
+    ```
+  </Step>
+
+  <Step title="Decrypt on server">
+    Server decrypts using the private key associated with keyId.
+  </Step>
+</Steps>
+
+## Client-Side Encryption
+
+### Encryption Implementation
+
+Use the RSA public key to encrypt data before sending to the server:
+
+```typescript
+// From: src/lib/common/helpers/crypto.ts:44-60
+import * as crypto from 'crypto';
+
+/**
+ * Encrypts data using a public key
+ * @param data Data to encrypt
+ * @param publicKey Public key to use for encryption
+ * @returns Encrypted data as a base64 string
+ */
+export function encryptData(data: string, publicKey: string): string {
+  try {
+    const buffer = Buffer.from(data, 'utf-8');
+    const encrypted = crypto.publicEncrypt(
+      {
+        key: publicKey,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+      },
+      buffer,
+    );
+
+    return encrypted.toString('base64');
+  } catch (error) {
+    console.error('Encryption error:', error);
+    throw new Error('Failed to encrypt data');
+  }
+}
+```
+
+### Usage Example
+
+```typescript
+import * as crypto from 'crypto';
+
+// Encrypt sensitive data
+const passcode = '123456';
+const publicKey = `-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtPF7TYz4UeTwtko2yErl
+...
+-----END PUBLIC KEY-----`;
+
+const buffer = Buffer.from(passcode, 'utf-8');
+const encrypted = crypto.publicEncrypt(
+  {
+    key: publicKey,
+    padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+  },
+  buffer,
+);
+
+const encryptedData = encrypted.toString('base64');
+console.log('Encrypted:', encryptedData);
+```
+
+### Browser Compatibility
+
+For browser environments, use the Web Crypto API:
+
+```typescript
+async function encryptDataBrowser(
+  data: string,
+  publicKeyPem: string
+): Promise<string> {
+  // Convert PEM to ArrayBuffer
+  const pemHeader = '-----BEGIN PUBLIC KEY-----';
+  const pemFooter = '-----END PUBLIC KEY-----';
+  const pemContents = publicKeyPem
+    .replace(pemHeader, '')
+    .replace(pemFooter, '')
+    .replace(/\s/g, '');
+  
+  const binaryDer = atob(pemContents);
+  const publicKeyBuffer = new Uint8Array(binaryDer.length);
+  for (let i = 0; i < binaryDer.length; i++) {
+    publicKeyBuffer[i] = binaryDer.charCodeAt(i);
+  }
+
+  // Import the key
+  const publicKey = await crypto.subtle.importKey(
+    'spki',
+    publicKeyBuffer,
+    {
+      name: 'RSA-OAEP',
+      hash: 'SHA-256',
+    },
+    false,
+    ['encrypt']
+  );
+
+  // Encrypt the data
+  const encodedData = new TextEncoder().encode(data);
+  const encryptedBuffer = await crypto.subtle.encrypt(
+    { name: 'RSA-OAEP' },
+    publicKey,
+    encodedData
+  );
+
+  // Convert to base64
+  const encryptedArray = new Uint8Array(encryptedBuffer);
+  return btoa(String.fromCharCode(...encryptedArray));
+}
+```
+
+## Server-Side Decryption
+
+### Decryption Implementation
+
+```typescript
+// From: src/lib/common/helpers/crypto.ts:68-84
+/**
+ * Decrypts data using a private key
+ * @param encryptedData Encrypted data as a base64 string
+ * @param privateKey Private key to use for decryption
+ * @returns Decrypted data as a string
+ */
+export function decryptData(encryptedData: string, privateKey: string): string {
+  try {
+    const buffer = Buffer.from(encryptedData, 'base64');
+    const decrypted = crypto.privateDecrypt(
+      {
+        key: privateKey,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+      },
+      buffer,
+    );
+
+    return decrypted.toString('utf-8');
+  } catch (error) {
+    console.error('Decryption error:', error);
+    throw new Error('Failed to decrypt data');
+  }
+}
+```
+
+### Decryption Service
+
+The EncryptionService handles secure decryption with validation:
+
+```typescript
+// From: src/encryption/encryption.service.ts:136-157
+/**
+ * Decrypts data using the private key associated with the given keyId
+ * Validates encrypted data size and records metrics
+ */
+async decryptWithPrivateKey(
+  encryptedData: string,
+  keyId: string,
+): Promise<string> {
+  try {
+    this.logger.debug(`Attempting to decrypt data with keyId: ${keyId}`);
+
+    // Validate encrypted data size
+    this.validateEncryptedDataSize(encryptedData);
+
+    const privateKey = await this.getPrivateKey(keyId);
+    const decryptedData = await decryptData(encryptedData, privateKey);
+
+    this.logger.debug(`Successfully decrypted data with keyId: ${keyId}`);
+    this.recordDecryptionSuccessMetric(keyId);
+    return decryptedData;
+  } catch (error) {
+    this.logger.error(`Decryption failed: ${error.message}`, error.stack);
+    this.recordDecryptionFailureMetric(keyId, error.message);
+    throw new Error('Failed to decrypt data');
+  }
+}
+```
+
+### Private Key Retrieval
+
+Private keys are securely retrieved and validated:
+
+```typescript
+// From: src/encryption/encryption.service.ts:104-130
+private async getPrivateKey(keyId: string): Promise<string> {
+  try {
+    const keyEntry = await this.prismaService.clientEncryptionKey.findUnique({
+      where: { id: keyId },
+    });
+
+    if (!keyEntry) {
+      this.logger.warn(`Private key not found for keyId: ${keyId}`);
+      throw new Error('Encryption key not found');
+    }
+
+    // Check if key has expired - key rotation enforcement
+    if (keyEntry.expiresAt && keyEntry.expiresAt < new Date()) {
+      this.logger.warn(`Key with ID ${keyId} has expired`);
+      throw new Error('Encryption key has expired');
+    }
+
+    return keyEntry.privateKey;
+  } catch (error) {
+    this.logger.error(
+      `Failed to retrieve private key: ${error.message}`,
+      error.stack,
+    );
+    this.recordDecryptionFailureMetric(keyId, 'key_retrieval_failed');
+    throw new Error('Failed to retrieve encryption key');
+  }
+}
+```
+
+## Data Size Validation
+
+The service enforces maximum encrypted data size to prevent abuse:
+
+```typescript
+// From: src/encryption/encryption.service.ts:215-222
+private validateEncryptedDataSize(encryptedData: string): void {
+  if (encryptedData.length > this.maxEncryptedDataSize) {
+    this.logger.warn(
+      `Encrypted data exceeds maximum allowed size: ${encryptedData.length} > ${this.maxEncryptedDataSize}`,
+    );
+    throw new Error('Encrypted data size exceeds limit');
+  }
+}
+```
+
+Default maximum size: **2048 bytes**
+
+Configure via environment variable:
+```bash
+MAX_ENCRYPTED_DATA_SIZE=2048
+```
+
+## Testing Encryption (Development Only)
+
+The service provides a development mutation to test encryption like a client:
+
+```graphql
+mutation TestEncryption {
+  encryptDataLikeClient(input: {
+    body: "123456"
+    publicKey: "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
+  }) {
+    encryptedData
+  }
+}
+```
+
+### Implementation
+
+```typescript
+// From: src/encryption/encryption.resolver.ts:58-63
+@Mutation(() => EncryptionKeyOutput)
+async encryptDataLikeClient(
+  @Args('input') input: EncryptDataPayload,
+): Promise<EncryptDataPayloadOutput> {
+  return { encryptedData: encryptData(input.body, input.publicKey) };
+}
+```
+
+## Complete Example
+
+<CodeGroup>
+```typescript Full Workflow
+import * as crypto from 'crypto';
+
+// Step 1: Generate encryption key
+const keyResponse = await fetch('/graphql', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    query: `
+      mutation {
+        generateClientEncryptionKey(input: {
+          deviceId: "device-12345"
+          appVersion: "1.0.0"
+        }) {
+          publicKey
+          keyId
+        }
+      }
+    `
+  })
+});
+
+const { data: { generateClientEncryptionKey } } = await keyResponse.json();
+const { publicKey, keyId } = generateClientEncryptionKey;
+
+// Step 2: Encrypt sensitive data
+function encryptData(data: string, publicKey: string): string {
+  const buffer = Buffer.from(data, 'utf-8');
+  const encrypted = crypto.publicEncrypt(
+    {
+      key: publicKey,
+      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+    },
+    buffer,
+  );
+  return encrypted.toString('base64');
+}
+
+const passcode = '123456';
+const encryptedPasscode = encryptData(passcode, publicKey);
+
+// Step 3: Send encrypted data to server
+const setResponse = await fetch('/graphql', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    query: `
+      mutation SetPasscode($input: EncryptedPasscodeInput!) {
+        setUserPasscode(input: $input)
+      }
+    `,
+    variables: {
+      input: {
+        encryptedPasscode,
+        keyId
+      }
+    }
+  })
+});
+
+const { data: { setUserPasscode } } = await setResponse.json();
+console.log('Passcode set:', setUserPasscode); // true
+```
+
+```typescript React Hook
+import { useState, useCallback } from 'react';
+import * as crypto from 'crypto';
+
+interface EncryptionKey {
+  publicKey: string;
+  keyId: string;
+}
+
+export function useEncryption(deviceId: string) {
+  const [key, setKey] = useState<EncryptionKey | null>(null);
+
+  const generateKey = useCallback(async () => {
+    const response = await fetch('/graphql', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: `
+          mutation GenerateKey($input: ClientIdentityInput!) {
+            generateClientEncryptionKey(input: $input) {
+              publicKey
+              keyId
+            }
+          }
+        `,
+        variables: {
+          input: { deviceId, appVersion: '1.0.0' }
+        }
+      })
+    });
+
+    const { data } = await response.json();
+    setKey(data.generateClientEncryptionKey);
+    return data.generateClientEncryptionKey;
+  }, [deviceId]);
+
+  const encrypt = useCallback((data: string): string => {
+    if (!key) throw new Error('No encryption key available');
+
+    const buffer = Buffer.from(data, 'utf-8');
+    const encrypted = crypto.publicEncrypt(
+      {
+        key: key.publicKey,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+      },
+      buffer,
+    );
+    return encrypted.toString('base64');
+  }, [key]);
+
+  return { key, generateKey, encrypt };
+}
+```
+</CodeGroup>
+
+## Security Considerations
+
+<CardGroup cols={2}>
+  <Card title="RSA-2048 Encryption" icon="lock">
+    Uses industry-standard 2048-bit RSA keys with PKCS1_OAEP padding for secure encryption.
+  </Card>
+  
+  <Card title="Private Keys Never Exposed" icon="shield">
+    Private keys remain on the server and are never transmitted to clients.
+  </Card>
+  
+  <Card title="Key Expiration" icon="clock">
+    Keys automatically expire after 30 days, enforcing regular rotation.
+  </Card>
+  
+  <Card title="Size Validation" icon="ruler">
+    Encrypted data is validated to prevent oversized payloads (max 2048 bytes).
+  </Card>
+</CardGroup>
+
+## Error Handling
+
+### Common Errors
+
+```typescript
+try {
+  const decrypted = await decryptWithPrivateKey(encryptedData, keyId);
+} catch (error) {
+  if (error.message === 'Encryption key not found') {
+    // Key was deleted or never existed
+    // Action: Generate a new key
+  } else if (error.message === 'Encryption key has expired') {
+    // Key has expired
+    // Action: Rotate the key
+  } else if (error.message === 'Encrypted data size exceeds limit') {
+    // Data too large
+    // Action: Reduce payload size
+  } else if (error.message === 'Failed to decrypt data') {
+    // Decryption failed (wrong key, corrupted data, etc.)
+    // Action: Verify keyId matches encryption key
+  }
+}
+```
+
+### Client-Side Error Handling
+
+```typescript
+function encryptWithErrorHandling(data: string, publicKey: string): string | null {
+  try {
+    if (data.length > 200) {
+      throw new Error('Data too large for RSA encryption');
+    }
+
+    const buffer = Buffer.from(data, 'utf-8');
+    const encrypted = crypto.publicEncrypt(
+      {
+        key: publicKey,
+        padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+      },
+      buffer,
+    );
+
+    return encrypted.toString('base64');
+  } catch (error) {
+    console.error('Encryption failed:', error);
+    return null;
+  }
+}
+```
+
+## Performance Considerations
+
+### RSA Data Size Limits
+
+RSA-2048 can encrypt a maximum of **214 bytes** of plaintext data with PKCS1_OAEP padding:
+
+- **Key size**: 2048 bits (256 bytes)
+- **PKCS1_OAEP overhead**: ~42 bytes
+- **Maximum plaintext**: ~214 bytes
+
+For larger data:
+1. Use hybrid encryption (RSA + AES)
+2. Split data into smaller chunks
+3. Hash data and encrypt the hash
+
+### Encryption Speed
+
+- **Client-side encryption**: ~1-5ms per operation
+- **Server-side decryption**: ~2-10ms per operation
+
+Both operations are fast enough for real-time user authentication.
+
+## Monitoring
+
+All decryption operations are automatically logged for monitoring:
+
+```typescript
+// From: src/encryption/encryption.service.ts:282-290
+private recordDecryptionSuccessMetric(keyId: string): void {
+  this.logger.log(`METRIC: decryption_success keyId=${keyId}`);
+}
+
+private recordDecryptionFailureMetric(keyId: string, reason: string): void {
+  this.logger.log(
+    `METRIC: decryption_failure keyId=${keyId} reason=${reason}`,
+  );
+}
+```
+
+See the [Monitoring Guide](/guides/monitoring) for details on tracking encryption metrics.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Authentication" href="/guides/authentication" icon="user-shield">
+    Implement secure passcode and PIN authentication
+  </Card>
+  
+  <Card title="Monitoring" href="/guides/monitoring" icon="chart-line">
+    Track encryption metrics and monitor system health
+  </Card>
+</CardGroup>

@@ -1,0 +1,473 @@
+---
+title: Authentication Guide
+description: Learn how to set and verify user passcodes and transaction PINs using encrypted authentication
+---
+
+This guide demonstrates how to implement secure authentication using client-side encryption and server-side decryption for passcodes and transaction PINs.
+
+## Overview
+
+The KMS provides encrypted authentication for:
+- User passcodes (login authentication)
+- Transaction PINs (payment authorization)
+
+All sensitive data is encrypted on the client-side using RSA public key encryption before transmission to the server.
+
+## Authentication Flow
+
+<Steps>
+  <Step title="Generate encryption key">
+    First, obtain a public key for encrypting sensitive data:
+
+    ```graphql
+    mutation GenerateKey {
+      generateClientEncryptionKey(input: {
+        deviceId: "device-12345"
+        appVersion: "1.0.0"
+      }) {
+        publicKey
+        keyId
+      }
+    }
+    ```
+
+    Store both the `publicKey` (for encryption) and `keyId` (for server-side decryption) on the client.
+  </Step>
+
+  <Step title="Encrypt sensitive data client-side">
+    Use the public key to encrypt the passcode or PIN before sending to the server:
+
+    ```typescript
+    import * as crypto from 'crypto';
+
+    function encryptData(data: string, publicKey: string): string {
+      const buffer = Buffer.from(data, 'utf-8');
+      const encrypted = crypto.publicEncrypt(
+        {
+          key: publicKey,
+          padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+        },
+        buffer,
+      );
+      return encrypted.toString('base64');
+    }
+
+    // Example: Encrypt a passcode
+    const passcode = "123456";
+    const encryptedPasscode = encryptData(passcode, publicKey);
+    ```
+  </Step>
+
+  <Step title="Send encrypted data to server">
+    Submit the encrypted passcode or PIN along with the keyId:
+
+    ```graphql
+    mutation SetPasscode {
+      setUserPasscode(input: {
+        encryptedPasscode: "base64-encrypted-string"
+        keyId: "key_1234567890_abc123def456"
+      })
+    }
+    ```
+  </Step>
+</Steps>
+
+## Setting User Passcode
+
+### GraphQL Mutation
+
+```graphql
+mutation SetUserPasscode($input: EncryptedPasscodeInput!) {
+  setUserPasscode(input: $input)
+}
+```
+
+### Input Type
+
+```typescript
+interface EncryptedPasscodeInput {
+  encryptedPasscode: string;  // Base64-encoded encrypted passcode
+  keyId: string;              // Key ID from generateClientEncryptionKey
+}
+```
+
+### Server-Side Implementation
+
+The server decrypts and securely stores the passcode using bcrypt hashing:
+
+```typescript
+// From: src/auth/auth.service.ts:15-46
+async setUserPasscode(
+  userId: string,
+  encryptedPasscode: string,
+  keyId: string,
+): Promise<boolean> {
+  try {
+    // Decrypt the passcode
+    const decryptedPasscode =
+      await this.encryptionService.decryptWithPrivateKey(
+        encryptedPasscode,
+        keyId,
+      );
+
+    // Hash the passcode for storage
+    const hashedPasscode = await bcrypt.hash(decryptedPasscode, 10);
+
+    // Store the hashed passcode
+    await this.prismaService.user.update({
+      where: { id: userId },
+      data: { passcode: hashedPasscode },
+    });
+
+    this.logger.log(`Successfully set passcode for user: ${userId}`);
+    return true;
+  } catch (error) {
+    this.logger.error(
+      `Failed to set user passcode: ${error.message}`,
+      error.stack,
+    );
+    throw new Error('Failed to set passcode');
+  }
+}
+```
+
+## Verifying User Passcode
+
+### GraphQL Mutation
+
+```graphql
+mutation VerifyUserPasscode($input: EncryptedVerifyPasscodeInput!) {
+  verifyUserPasscode(input: $input)
+}
+```
+
+### Input Type
+
+```typescript
+interface EncryptedVerifyPasscodeInput {
+  encryptedPasscode: string;  // Base64-encoded encrypted passcode
+  keyId: string;              // Key ID from generateClientEncryptionKey
+}
+```
+
+### Server-Side Implementation
+
+```typescript
+// From: src/auth/auth.service.ts:51-93
+async verifyUserPasscode(
+  userId: string,
+  encryptedPasscode: string,
+  keyId: string,
+): Promise<boolean> {
+  try {
+    // Get the user
+    const user = await this.prismaService.user.findUnique({
+      where: { id: userId },
+    });
+
+    if (!user || !user.passcode) {
+      this.logger.warn(
+        `User not found or passcode not set for user: ${userId}`,
+      );
+      return false;
+    }
+
+    // Decrypt the passcode
+    const decryptedPasscode =
+      await this.encryptionService.decryptWithPrivateKey(
+        encryptedPasscode,
+        keyId,
+      );
+
+    // Verify the passcode
+    const isMatch = await bcrypt.compare(decryptedPasscode, user.passcode);
+
+    if (isMatch) {
+      this.logger.log(`Passcode verified successfully for user: ${userId}`);
+    } else {
+      this.logger.warn(`Passcode verification failed for user: ${userId}`);
+    }
+
+    return isMatch;
+  } catch (error) {
+    this.logger.error(
+      `Passcode verification failed: ${error.message}`,
+      error.stack,
+    );
+    return false;
+  }
+}
+```
+
+## Setting Transaction PIN
+
+### GraphQL Mutation
+
+```graphql
+mutation SetTransactionPin($input: EncryptedTransactionPinInput!) {
+  setTransactionPin(input: $input)
+}
+```
+
+### Input Type
+
+```typescript
+interface EncryptedTransactionPinInput {
+  encryptedPin: string;  // Base64-encoded encrypted PIN
+  keyId: string;         // Key ID from generateClientEncryptionKey
+}
+```
+
+### Server-Side Implementation
+
+```typescript
+// From: src/auth/auth.service.ts:98-128
+async setTransactionPin(
+  userId: string,
+  encryptedPin: string,
+  keyId: string,
+): Promise<boolean> {
+  try {
+    // Decrypt the PIN
+    const decryptedPin = await this.encryptionService.decryptWithPrivateKey(
+      encryptedPin,
+      keyId,
+    );
+
+    // Hash the PIN for storage
+    const hashedPin = await bcrypt.hash(decryptedPin, 10);
+
+    // Store the hashed PIN
+    await this.prismaService.user.update({
+      where: { id: userId },
+      data: { transactionPin: hashedPin },
+    });
+
+    this.logger.log(`Successfully set transaction PIN for user: ${userId}`);
+    return true;
+  } catch (error) {
+    this.logger.error(
+      `Failed to set transaction PIN: ${error.message}`,
+      error.stack,
+    );
+    throw new Error('Failed to set transaction PIN');
+  }
+}
+```
+
+## Verifying Transaction PIN
+
+### GraphQL Mutation
+
+```graphql
+mutation VerifyTransactionPin($input: EncryptedVerifyTransactionPinInput!) {
+  verifyTransactionPin(input: $input)
+}
+```
+
+### Input Type
+
+```typescript
+interface EncryptedVerifyTransactionPinInput {
+  encryptedPin: string;  // Base64-encoded encrypted PIN
+  keyId: string;         // Key ID from generateClientEncryptionKey
+}
+```
+
+### Server-Side Implementation
+
+```typescript
+// From: src/auth/auth.service.ts:133-178
+async verifyTransactionPin(
+  userId: string,
+  encryptedPin: string,
+  keyId: string,
+): Promise<boolean> {
+  try {
+    // Get the user
+    const user = await this.prismaService.user.findUnique({
+      where: { id: userId },
+    });
+
+    if (!user || !user.transactionPin) {
+      this.logger.warn(
+        `User not found or transaction PIN not set for user: ${userId}`,
+      );
+      return false;
+    }
+
+    // Decrypt the PIN
+    const decryptedPin = await this.encryptionService.decryptWithPrivateKey(
+      encryptedPin,
+      keyId,
+    );
+
+    // Verify the PIN
+    const isMatch = await bcrypt.compare(decryptedPin, user.transactionPin);
+
+    if (isMatch) {
+      this.logger.log(
+        `Transaction PIN verified successfully for user: ${userId}`,
+      );
+    } else {
+      this.logger.warn(
+        `Transaction PIN verification failed for user: ${userId}`,
+      );
+    }
+
+    return isMatch;
+  } catch (error) {
+    this.logger.error(
+      `Transaction PIN verification failed: ${error.message}`,
+      error.stack,
+    );
+    return false;
+  }
+}
+```
+
+## Complete Example
+
+<CodeGroup>
+```typescript Client-Side (TypeScript)
+import * as crypto from 'crypto';
+
+// 1. Generate encryption key
+const { publicKey, keyId } = await generateKey({
+  deviceId: 'device-12345',
+  appVersion: '1.0.0'
+});
+
+// 2. Encrypt passcode
+function encryptData(data: string, publicKey: string): string {
+  const buffer = Buffer.from(data, 'utf-8');
+  const encrypted = crypto.publicEncrypt(
+    {
+      key: publicKey,
+      padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+    },
+    buffer,
+  );
+  return encrypted.toString('base64');
+}
+
+const passcode = '123456';
+const encryptedPasscode = encryptData(passcode, publicKey);
+
+// 3. Set passcode
+await setUserPasscode({
+  encryptedPasscode,
+  keyId
+});
+
+// 4. Verify passcode
+const userInput = '123456';
+const encryptedInput = encryptData(userInput, publicKey);
+const isValid = await verifyUserPasscode({
+  encryptedPasscode: encryptedInput,
+  keyId
+});
+```
+
+```graphql GraphQL Operations
+# Generate key
+mutation {
+  generateClientEncryptionKey(input: {
+    deviceId: "device-12345"
+    appVersion: "1.0.0"
+  }) {
+    publicKey
+    keyId
+  }
+}
+
+# Set passcode
+mutation {
+  setUserPasscode(input: {
+    encryptedPasscode: "base64-encrypted-string"
+    keyId: "key_1234567890_abc123def456"
+  })
+}
+
+# Verify passcode
+mutation {
+  verifyUserPasscode(input: {
+    encryptedPasscode: "base64-encrypted-string"
+    keyId: "key_1234567890_abc123def456"
+  })
+}
+
+# Set transaction PIN
+mutation {
+  setTransactionPin(input: {
+    encryptedPin: "base64-encrypted-string"
+    keyId: "key_1234567890_abc123def456"
+  })
+}
+
+# Verify transaction PIN
+mutation {
+  verifyTransactionPin(input: {
+    encryptedPin: "base64-encrypted-string"
+    keyId: "key_1234567890_abc123def456"
+  })
+}
+```
+</CodeGroup>
+
+## Security Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Client-Side Encryption" icon="lock">
+    Always encrypt sensitive data on the client before transmission. Never send plaintext passcodes or PINs.
+  </Card>
+  
+  <Card title="Key Management" icon="key">
+    Store the keyId securely on the client. Use the same key for verification that was used during setup.
+  </Card>
+  
+  <Card title="Server-Side Hashing" icon="shield">
+    The server decrypts and immediately hashes passwords using bcrypt with 10 salt rounds.
+  </Card>
+  
+  <Card title="No Plaintext Storage" icon="database">
+    Only hashed values are stored in the database. Plaintext is never persisted.
+  </Card>
+</CardGroup>
+
+## Error Handling
+
+The authentication mutations return `false` on failure without throwing errors for verification operations:
+
+- `setUserPasscode` / `setTransactionPin`: Throws error on failure
+- `verifyUserPasscode` / `verifyTransactionPin`: Returns `false` on failure
+
+```typescript
+// Set operations throw on error
+try {
+  await setUserPasscode(input);
+  console.log('Passcode set successfully');
+} catch (error) {
+  console.error('Failed to set passcode:', error.message);
+}
+
+// Verify operations return boolean
+const isValid = await verifyUserPasscode(input);
+if (isValid) {
+  console.log('Authentication successful');
+} else {
+  console.log('Authentication failed');
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Key Generation" href="/guides/key-generation" icon="key">
+    Learn about key generation and rotation strategies
+  </Card>
+  
+  <Card title="Encryption & Decryption" href="/guides/encryption-decryption" icon="lock">
+    Understand the encryption/decryption workflow
+  </Card>
+</CardGroup>

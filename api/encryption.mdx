@@ -1,0 +1,254 @@
+---
+title: 'Encryption Operations'
+description: 'GraphQL mutations and queries for encryption key management and data encryption'
+---
+
+## Generate Client Encryption Key
+
+Generates a new encryption key pair for a client device.
+
+### Mutation
+
+```graphql
+mutation GenerateClientEncryptionKey($input: ClientIdentityInput!) {
+  generateClientEncryptionKey(input: $input) {
+    publicKey
+    keyId
+  }
+}
+```
+
+### Input Parameters
+
+<ParamField path="input" type="ClientIdentityInput" required>
+  Client identity information
+  
+  <ParamField path="deviceId" type="string" required>
+    Unique identifier for the client device
+  </ParamField>
+  
+  <ParamField path="appVersion" type="string">
+    Application version (optional)
+  </ParamField>
+</ParamField>
+
+### Response
+
+<ResponseField name="publicKey" type="string">
+  The generated RSA public key in PEM format
+</ResponseField>
+
+<ResponseField name="keyId" type="string">
+  Unique identifier for the generated key pair
+</ResponseField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:3000/graphql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "mutation GenerateClientEncryptionKey($input: ClientIdentityInput!) { generateClientEncryptionKey(input: $input) { publicKey keyId } }",
+    "variables": {
+      "input": {
+        "deviceId": "device-12345",
+        "appVersion": "1.0.0"
+      }
+    }
+  }'
+```
+
+### Example Response
+
+```json
+{
+  "data": {
+    "generateClientEncryptionKey": {
+      "publicKey": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtPF7TYz4UeTwtko2yErl\nz6/ehb+X9b2v7c6EeIz2Mv17NgNFj6/ttRoro8DcetZTNJDf36RlRS06WtR0ug8T\npemdm7vyeqwfwBcoxrvwXEdUepketChtVd3vivdoHVqonMZ8fZ2TBrN4yRRXsDWR\nb3Z80wUwk5rUmGX2wO5d3veGDP0XGoO3cpKOR3IyjTCJhXqSTa6WIHG6uVZrY6nL\n1iB21v3bHh4xM0aToGlTkG7hMiRrzVG6m0YugyioGpsTzLedzDUc7wUWXGjro2Nv\nxXCcOG60T3MJ25m036i3++jaT1HCYKufJlCJpk6YR4D09RfwGiiHj7Y+ULpftoP6\nsQIDAQAB\n-----END PUBLIC KEY-----\n",
+      "keyId": "clm8x9z1a0000xyz1234abcd"
+    }
+  }
+}
+```
+
+---
+
+## Rotate Client Encryption Key
+
+Rotates the encryption key for an existing client device, invalidating the previous key.
+
+### Mutation
+
+```graphql
+mutation RotateClientEncryptionKey($input: ClientIdentityInput!) {
+  rotateClientEncryptionKey(input: $input) {
+    publicKey
+    keyId
+  }
+}
+```
+
+### Input Parameters
+
+<ParamField path="input" type="ClientIdentityInput" required>
+  Client identity information
+  
+  <ParamField path="deviceId" type="string" required>
+    Unique identifier for the client device
+  </ParamField>
+  
+  <ParamField path="appVersion" type="string">
+    Application version (optional)
+  </ParamField>
+</ParamField>
+
+### Response
+
+<ResponseField name="publicKey" type="string">
+  The new RSA public key in PEM format
+</ResponseField>
+
+<ResponseField name="keyId" type="string">
+  Unique identifier for the new key pair
+</ResponseField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:3000/graphql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "mutation RotateClientEncryptionKey($input: ClientIdentityInput!) { rotateClientEncryptionKey(input: $input) { publicKey keyId } }",
+    "variables": {
+      "input": {
+        "deviceId": "device-12345"
+      }
+    }
+  }'
+```
+
+### Example Response
+
+```json
+{
+  "data": {
+    "rotateClientEncryptionKey": {
+      "publicKey": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...\n-----END PUBLIC KEY-----\n",
+      "keyId": "clm8x9z1a0001xyz5678efgh"
+    }
+  }
+}
+```
+
+---
+
+## Encrypt Data Like Client
+
+Encrypts data using a provided public key, simulating client-side encryption.
+
+### Mutation
+
+```graphql
+mutation EncryptDataLikeClient($input: EncryptDataPayload!) {
+  encryptDataLikeClient(input: $input) {
+    encryptedData
+  }
+}
+```
+
+### Input Parameters
+
+<ParamField path="input" type="EncryptDataPayload" required>
+  Encryption payload
+  
+  <ParamField path="body" type="string" required>
+    The plaintext data to encrypt
+  </ParamField>
+  
+  <ParamField path="publicKey" type="string" required>
+    The RSA public key in PEM format to use for encryption
+  </ParamField>
+</ParamField>
+
+### Response
+
+<ResponseField name="encryptedData" type="string">
+  The encrypted data as a base64-encoded string
+</ResponseField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:3000/graphql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "mutation EncryptDataLikeClient($input: EncryptDataPayload!) { encryptDataLikeClient(input: $input) { encryptedData } }",
+    "variables": {
+      "input": {
+        "body": "123456",
+        "publicKey": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtPF7TYz4UeTwtko2yErl\nz6/ehb+X9b2v7c6EeIz2Mv17NgNFj6/ttRoro8DcetZTNJDf36RlRS06WtR0ug8T\npemdm7vyeqwfwBcoxrvwXEdUepketChtVd3vivdoHVqonMZ8fZ2TBrN4yRRXsDWR\nb3Z80wUwk5rUmGX2wO5d3veGDP0XGoO3cpKOR3IyjTCJhXqSTa6WIHG6uVZrY6nL\n1iB21v3bHh4xM0aToGlTkG7hMiRrzVG6m0YugyioGpsTzLedzDUc7wUWXGjro2Nv\nxXCcOG60T3MJ25m036i3++jaT1HCYKufJlCJpk6YR4D09RfwGiiHj7Y+ULpftoP6\nsQIDAQAB\n-----END PUBLIC KEY-----\n"
+      }
+    }
+  }'
+```
+
+### Example Response
+
+```json
+{
+  "data": {
+    "encryptDataLikeClient": {
+      "encryptedData": "aGVsbG8gd29ybGQgZW5jcnlwdGVkIGRhdGE="
+    }
+  }
+}
+```
+
+---
+
+## Get Encryption Metrics Summary
+
+Retrieves a summary of encryption operations metrics for a specified timeframe.
+
+### Query
+
+```graphql
+query GetEncryptionMetricsSummary($timeframeHours: Float) {
+  getEncryptionMetricsSummary(timeframeHours: $timeframeHours)
+}
+```
+
+### Input Parameters
+
+<ParamField path="timeframeHours" type="number" default="24">
+  Number of hours to look back for metrics (defaults to 24 hours)
+</ParamField>
+
+### Response
+
+<ResponseField name="getEncryptionMetricsSummary" type="string">
+  JSON string containing metrics summary including success/failure counts, average duration, and device statistics
+</ResponseField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:3000/graphql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "query GetEncryptionMetricsSummary($timeframeHours: Float) { getEncryptionMetricsSummary(timeframeHours: $timeframeHours) }",
+    "variables": {
+      "timeframeHours": 48
+    }
+  }'
+```
+
+### Example Response
+
+```json
+{
+  "data": {
+    "getEncryptionMetricsSummary": "{\n  \"totalOperations\": 1250,\n  \"successfulOperations\": 1248,\n  \"failedOperations\": 2,\n  \"successRate\": 99.84,\n  \"averageDuration\": 45.2,\n  \"uniqueDevices\": 342,\n  \"timeframeHours\": 48\n}"
+  }
+}
+```

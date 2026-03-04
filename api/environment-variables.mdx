@@ -1,0 +1,120 @@
+---
+title: "Environment Variables"
+description: "Configure the Key Management Service using environment variables for encryption, key rotation, and data size limits"
+---
+
+The Key Management Service uses environment variables to configure key rotation intervals, data size limits, and key retention policies. All variables are loaded through NestJS ConfigService with sensible defaults.
+
+## Database Configuration
+
+<ParamField path="DATABASE_URL" type="string" required>
+  Database connection string for PostgreSQL. Used by Prisma to connect to the database where encryption keys are stored.
+  
+  **Example:**
+  ```bash
+  DATABASE_URL="postgresql://user:password@localhost:5432/kms_db"
+  ```
+</ParamField>
+
+## Encryption Key Configuration
+
+<ParamField path="ENCRYPTION_KEY_ROTATION_DAYS" type="number" default="30">
+  Number of days before encryption keys expire and need rotation. Keys are automatically marked as expired after this period.
+  
+  **Implementation:** `src/encryption/encryption.service.ts:24-27`
+  
+  ```typescript
+  this.keyRotationIntervalDays = this.configService.get(
+    'ENCRYPTION_KEY_ROTATION_DAYS',
+    30,
+  );
+  ```
+  
+  **Behavior:**
+  - Keys are generated with an expiration date set to current date + rotation days
+  - Expired keys are marked as deprecated by the daily cron job
+  - Clients are automatically issued existing valid keys if available
+</ParamField>
+
+<ParamField path="ENCRYPTION_KEY_RETENTION_DAYS" type="number" default="90">
+  Number of days to retain deprecated encryption keys before permanent deletion. This provides a grace period for decrypting old data.
+  
+  **Implementation:** `src/tasks/key-rotation.tasks.ts:18-21`
+  
+  ```typescript
+  this.keyRetentionDays = this.configService.get(
+    'ENCRYPTION_KEY_RETENTION_DAYS',
+    90,
+  );
+  ```
+  
+  **Behavior:**
+  - Deprecated keys are kept for the retention period
+  - Keys older than retention days are permanently deleted by the daily cron job
+  - Ensures old encrypted data can still be decrypted during the retention window
+</ParamField>
+
+## Data Validation Configuration
+
+<ParamField path="MAX_ENCRYPTED_DATA_SIZE" type="number" default="2048">
+  Maximum allowed size in bytes for encrypted data payloads. Requests exceeding this limit are rejected.
+  
+  **Implementation:** `src/encryption/encryption.service.ts:28-31`
+  
+  ```typescript
+  this.maxEncryptedDataSize = this.configService.get(
+    'MAX_ENCRYPTED_DATA_SIZE',
+    2048,
+  );
+  ```
+  
+  **Validation:** `src/encryption/encryption.service.ts:215-222`
+  
+  ```typescript
+  private validateEncryptedDataSize(encryptedData: string): void {
+    if (encryptedData.length > this.maxEncryptedDataSize) {
+      this.logger.warn(
+        `Encrypted data exceeds maximum allowed size: ${encryptedData.length} > ${this.maxEncryptedDataSize}`,
+      );
+      throw new Error('Encrypted data size exceeds limit');
+    }
+  }
+  ```
+  
+  **Error Response:**
+  - Status: 500
+  - Message: "Failed to decrypt data"
+  - Logged: Warning with actual size vs limit
+</ParamField>
+
+## Configuration Example
+
+Create a `.env` file in your project root:
+
+```bash
+# Database
+DATABASE_URL="postgresql://user:password@localhost:5432/kms_db"
+
+# Key Rotation (30 days)
+ENCRYPTION_KEY_ROTATION_DAYS=30
+
+# Key Retention (90 days grace period)
+ENCRYPTION_KEY_RETENTION_DAYS=90
+
+# Max encrypted payload size (2KB)
+MAX_ENCRYPTED_DATA_SIZE=2048
+```
+
+## Key Lifecycle Example
+
+```
+Day 0:   Key generated with expiresAt = Day 30
+Day 30:  Key expires, marked as deprecated by cron job
+Day 30+: Old data can still be decrypted using deprecated key
+Day 120: Key deleted permanently (30 + 90 retention days)
+```
+
+## Related Documentation
+
+- [Rate Limits](/api/rate-limits) - Key generation rate limiting
+- [Key Rotation](/concepts/key-rotation) - Automated key rotation process

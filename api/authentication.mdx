@@ -1,0 +1,278 @@
+---
+title: 'Authentication Operations'
+description: 'GraphQL mutations for managing user passcodes and transaction PINs'
+---
+
+## Set User Passcode
+
+Sets or updates the passcode for a user account. The passcode is stored in encrypted form.
+
+### Mutation
+
+```graphql
+mutation SetUserPasscode($input: EncryptedPasscodeInput!) {
+  setUserPasscode(input: $input)
+}
+```
+
+### Input Parameters
+
+<ParamField path="input" type="EncryptedPasscodeInput" required>
+  Encrypted passcode information
+  
+  <ParamField path="encryptedPasscode" type="string" required>
+    The user's passcode encrypted with the public key
+  </ParamField>
+  
+  <ParamField path="keyId" type="string" required>
+    The ID of the encryption key used to encrypt the passcode
+  </ParamField>
+  
+  <ParamField path="passwordAuthType" type="PASSWORD_AUTH_TYPE" required>
+    The type of authentication. Must be `PASSCODE` for this operation
+  </ParamField>
+</ParamField>
+
+### Response
+
+<ResponseField name="setUserPasscode" type="boolean">
+  Returns `true` if the passcode was successfully set, `false` otherwise
+</ResponseField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:3000/graphql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "mutation SetUserPasscode($input: EncryptedPasscodeInput!) { setUserPasscode(input: $input) }",
+    "variables": {
+      "input": {
+        "encryptedPasscode": "aGVsbG8gd29ybGQgZW5jcnlwdGVkIHBhc3Njb2Rl",
+        "keyId": "clm8x9z1a0000xyz1234abcd",
+        "passwordAuthType": "PASSCODE"
+      }
+    }
+  }'
+```
+
+### Example Response
+
+```json
+{
+  "data": {
+    "setUserPasscode": true
+  }
+}
+```
+
+---
+
+## Verify User Passcode
+
+Verifies that the provided passcode matches the user's stored passcode.
+
+### Mutation
+
+```graphql
+mutation VerifyUserPasscode($input: EncryptedVerifyPasscodeInput!) {
+  verifyUserPasscode(input: $input)
+}
+```
+
+### Input Parameters
+
+<ParamField path="input" type="EncryptedVerifyPasscodeInput" required>
+  Encrypted passcode verification information
+  
+  <ParamField path="encryptedPasscode" type="string" required>
+    The passcode to verify, encrypted with the public key
+  </ParamField>
+  
+  <ParamField path="keyId" type="string" required>
+    The ID of the encryption key used to encrypt the passcode
+  </ParamField>
+  
+  <ParamField path="passwordAuthType" type="PASSWORD_AUTH_TYPE" required>
+    The type of authentication. Must be `PASSCODE` for this operation
+  </ParamField>
+</ParamField>
+
+### Response
+
+<ResponseField name="verifyUserPasscode" type="boolean">
+  Returns `true` if the passcode is correct, `false` otherwise
+</ResponseField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:3000/graphql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "mutation VerifyUserPasscode($input: EncryptedVerifyPasscodeInput!) { verifyUserPasscode(input: $input) }",
+    "variables": {
+      "input": {
+        "encryptedPasscode": "aGVsbG8gd29ybGQgZW5jcnlwdGVkIHBhc3Njb2Rl",
+        "keyId": "clm8x9z1a0000xyz1234abcd",
+        "passwordAuthType": "PASSCODE"
+      }
+    }
+  }'
+```
+
+### Example Response
+
+```json
+{
+  "data": {
+    "verifyUserPasscode": true
+  }
+}
+```
+
+---
+
+## Set Transaction PIN
+
+Sets or updates the transaction PIN for a user account. The PIN is stored in encrypted form and used to authorize sensitive transactions.
+
+### Mutation
+
+```graphql
+mutation SetTransactionPin($input: EncryptedTransactionPinInput!) {
+  setTransactionPin(input: $input)
+}
+```
+
+### Input Parameters
+
+<ParamField path="input" type="EncryptedTransactionPinInput" required>
+  Encrypted transaction PIN information
+  
+  <ParamField path="encryptedPin" type="string" required>
+    The user's transaction PIN encrypted with the public key
+  </ParamField>
+  
+  <ParamField path="keyId" type="string" required>
+    The ID of the encryption key used to encrypt the PIN
+  </ParamField>
+  
+  <ParamField path="passwordAuthType" type="PASSWORD_AUTH_TYPE" required>
+    The type of authentication. Must be `TRANSACTION_PIN` for this operation
+  </ParamField>
+</ParamField>
+
+### Response
+
+<ResponseField name="setTransactionPin" type="boolean">
+  Returns `true` if the transaction PIN was successfully set, `false` otherwise
+</ResponseField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:3000/graphql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "mutation SetTransactionPin($input: EncryptedTransactionPinInput!) { setTransactionPin(input: $input) }",
+    "variables": {
+      "input": {
+        "encryptedPin": "ZW5jcnlwdGVkIHRyYW5zYWN0aW9uIHBpbg==",
+        "keyId": "clm8x9z1a0000xyz1234abcd",
+        "passwordAuthType": "TRANSACTION_PIN"
+      }
+    }
+  }'
+```
+
+### Example Response
+
+```json
+{
+  "data": {
+    "setTransactionPin": true
+  }
+}
+```
+
+---
+
+## Verify Transaction PIN
+
+Verifies that the provided transaction PIN matches the user's stored PIN.
+
+### Mutation
+
+```graphql
+mutation VerifyTransactionPin($input: EncryptedVerifyTransactionPinInput!) {
+  verifyTransactionPin(input: $input)
+}
+```
+
+### Input Parameters
+
+<ParamField path="input" type="EncryptedVerifyTransactionPinInput" required>
+  Encrypted transaction PIN verification information
+  
+  <ParamField path="encryptedPin" type="string" required>
+    The transaction PIN to verify, encrypted with the public key
+  </ParamField>
+  
+  <ParamField path="keyId" type="string" required>
+    The ID of the encryption key used to encrypt the PIN
+  </ParamField>
+  
+  <ParamField path="passwordAuthType" type="PASSWORD_AUTH_TYPE" required>
+    The type of authentication. Must be `TRANSACTION_PIN` for this operation
+  </ParamField>
+</ParamField>
+
+### Response
+
+<ResponseField name="verifyTransactionPin" type="boolean">
+  Returns `true` if the transaction PIN is correct, `false` otherwise
+</ResponseField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:3000/graphql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "mutation VerifyTransactionPin($input: EncryptedVerifyTransactionPinInput!) { verifyTransactionPin(input: $input) }",
+    "variables": {
+      "input": {
+        "encryptedPin": "ZW5jcnlwdGVkIHRyYW5zYWN0aW9uIHBpbg==",
+        "keyId": "clm8x9z1a0000xyz1234abcd",
+        "passwordAuthType": "TRANSACTION_PIN"
+      }
+    }
+  }'
+```
+
+### Example Response
+
+```json
+{
+  "data": {
+    "verifyTransactionPin": true
+  }
+}
+```
+
+---
+
+## Password Auth Types
+
+The `PASSWORD_AUTH_TYPE` enum defines the types of password authentication:
+
+- `PASSCODE`: User login passcode
+- `TRANSACTION_PIN`: Transaction authorization PIN
+
+## Security Considerations
+
+- All passcodes and PINs must be encrypted client-side using the public key obtained from `generateClientEncryptionKey` before being sent to the API
+- Always use the corresponding `keyId` when sending encrypted credentials
+- The service decrypts credentials server-side using the private key and stores them securely
+- Never send plaintext passcodes or PINs over the network

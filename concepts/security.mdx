@@ -1,0 +1,509 @@
+---
+title: 'Security Measures'
+description: 'Explore comprehensive security features including encryption at rest, rate limiting, key validation, and monitoring in the Key Management Service'
+---
+
+## Overview
+
+The Key Management Service implements multiple layers of security to protect encryption keys and sensitive data. These measures include rate limiting, data validation, key expiration enforcement, and comprehensive monitoring.
+
+<Warning>
+  Security is a shared responsibility. While the service provides robust protection, proper deployment configuration, network security, and access controls are essential.
+</Warning>
+
+## Encryption Standards
+
+### RSA-2048 with OAEP Padding
+
+The service uses industry-standard RSA encryption:
+
+```typescript
+const encrypted = crypto.publicEncrypt(
+  {
+    key: publicKey,
+    padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+  },
+  buffer,
+);
+```
+
+<Info>
+  **PKCS1_OAEP_PADDING** (Optimal Asymmetric Encryption Padding) provides enhanced security against padding oracle attacks compared to older padding schemes.
+  
+  Reference: crypto.ts:47-52
+</Info>
+
+### Key Specifications
+
+| Security Feature | Implementation | Benefit |
+|-----------------|----------------|----------|
+| **Algorithm** | RSA-2048 | Industry standard, NIST recommended |
+| **Padding** | PKCS1_OAEP | Protection against padding oracle attacks |
+| **Encoding** | PEM format | Wide compatibility and readability |
+| **Key Format** | SPKI (public) / PKCS8 (private) | Standard formats for interoperability |
+
+## Rate Limiting
+
+### Per-Device Key Generation Limits
+
+To prevent abuse and DoS attacks, the service implements rate limiting for key generation:
+
+```typescript
+private readonly MAX_KEY_GEN_PER_DEVICE = 5;
+private readonly KEY_GEN_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+private enforceKeyGenerationRateLimit(deviceId: string): void {
+  const now = Date.now();
+  const deviceLimits = this.deviceKeyGenLimits.get(deviceId) || {
+    count: 0,
+    resetTime: now + this.KEY_GEN_WINDOW_MS,
+  };
+  
+  // Reset counter if time window has passed
+  if (now > deviceLimits.resetTime) {
+    deviceLimits.count = 0;
+    deviceLimits.resetTime = now + this.KEY_GEN_WINDOW_MS;
+  }
+  
+  // Increment counter and update
+  deviceLimits.count++;
+  this.deviceKeyGenLimits.set(deviceId, deviceLimits);
+}
+```
+
+<Info>
+  Reference: encryption.service.ts:16-17, 227-254
+</Info>
+
+<Note>
+  **Default Limits**: A device can generate a maximum of **5 keys per 24-hour period**. This prevents malicious actors from overwhelming the service while allowing legitimate use cases.
+</Note>
+
+### GraphQL Request Throttling
+
+The service uses a custom throttler guard for GraphQL operations:
+
+```typescript
+@Injectable()
+export class CustomThrottlerGuard extends ThrottlerGuard {
+  protected getTrack(context: ExecutionContext): string {
+    const ctx = GqlExecutionContext.create(context);
+    const req = ctx.getContext().req;
+    
+    return req?.ip || req?.headers['x-forwarded-for'] || 'unknown-ip';
+  }
+}
+```
+
+<Info>
+  Reference: custon-trottler.guard.ts:6-13
+</Info>
+
+This guard:
+- Tracks requests by IP address
+- Handles proxied requests via `x-forwarded-for` header
+- Integrates with NestJS's `@nestjs/throttler` module
+
+## Data Validation
+
+### Encrypted Data Size Limits
+
+The service enforces maximum data size to prevent resource exhaustion:
+
+```typescript
+private readonly maxEncryptedDataSize: number;
+
+constructor(
+  private readonly configService: ConfigService,
+) {
+  this.maxEncryptedDataSize = this.configService.get(
+    'MAX_ENCRYPTED_DATA_SIZE',
+    2048,  // Default: 2048 bytes
+  );
+}
+
+private validateEncryptedDataSize(encryptedData: string): void {
+  if (encryptedData.length > this.maxEncryptedDataSize) {
+    this.logger.warn(
+      `Encrypted data exceeds maximum allowed size: ${encryptedData.length} > ${this.maxEncryptedDataSize}`
+    );
+    throw new Error('Encrypted data size exceeds limit');
+  }
+}
+```
+
+<Info>
+  Reference: encryption.service.ts:11, 28-31, 215-222
+</Info>
+
+<Warning>
+  RSA encryption is designed for small data payloads. For larger data, use hybrid encryption (RSA for key exchange, AES for data encryption).
+</Warning>
+
+### Size Validation Workflow
+
+```typescript
+async decryptWithPrivateKey(
+  encryptedData: string,
+  keyId: string,
+): Promise<string> {
+  // Validate encrypted data size BEFORE decryption
+  this.validateEncryptedDataSize(encryptedData);
+  
+  const privateKey = await this.getPrivateKey(keyId);
+  const decryptedData = await decryptData(encryptedData, privateKey);
+  
+  return decryptedData;
+}
+```
+
+<Info>
+  Reference: encryption.service.ts:136-156
+</Info>
+
+## Key Validation
+
+### Expiration Enforcement
+
+Every key operation validates that the key has not expired:
+
+```typescript
+private async getPrivateKey(keyId: string): Promise<string> {
+  const keyEntry = await this.prismaService.clientEncryptionKey.findUnique({
+    where: { id: keyId },
+  });
+  
+  if (!keyEntry) {
+    throw new Error('Encryption key not found');
+  }
+  
+  // Check if key has expired
+  if (keyEntry.expiresAt && keyEntry.expiresAt < new Date()) {
+    this.logger.warn(`Key with ID ${keyId} has expired`);
+    throw new Error('Encryption key has expired');
+  }
+  
+  return keyEntry.privateKey;
+}
+```
+
+<Info>
+  Reference: encryption.service.ts:104-130
+</Info>
+
+### Key Validation API
+
+The service provides a validation method to check key validity:
+
+```typescript
+async validateKeyId(keyId: string): Promise<boolean> {
+  const keyEntry = await this.prismaService.clientEncryptionKey.findUnique({
+    where: { id: keyId },
+  });
+  
+  if (!keyEntry) return false;
+  
+  // Check if key has expired
+  if (keyEntry.expiresAt && keyEntry.expiresAt < new Date()) {
+    return false;
+  }
+  
+  return true;
+}
+```
+
+<Info>
+  Reference: encryption.service.ts:162-180
+</Info>
+
+## Monitoring and Auditing
+
+### Comprehensive Metrics Collection
+
+All encryption operations are logged with detailed metrics:
+
+```typescript
+async recordMetric(
+  operation: 'encrypt' | 'decrypt' | 'generate',
+  status: 'success' | 'failure',
+  {
+    keyId = null,
+    deviceId = null,
+    errorReason = null,
+    duration = 0,
+  }
+): Promise<void> {
+  await this.prismaService.encryptionMetric.create({
+    data: {
+      keyId,
+      deviceId,
+      operation,
+      status,
+      errorReason,
+      duration,
+      timestamp: new Date(),
+    },
+  });
+}
+```
+
+<Info>
+  Reference: encryption-monitoring.service.ts:13-46
+</Info>
+
+### Tracked Metrics
+
+<Accordion title="Key Generation Metrics">
+  ```typescript
+  private recordKeyGenerationMetric(deviceId: string): void {
+    this.logger.log(`METRIC: key_generation_success deviceId=${deviceId}`);
+  }
+  ```
+  
+  Tracks:
+  - Device ID
+  - Generation timestamp
+  - Success/failure status
+  - Duration
+  
+  Reference: encryption.service.ts:278-280
+</Accordion>
+
+<Accordion title="Decryption Success Metrics">
+  ```typescript
+  private recordDecryptionSuccessMetric(keyId: string): void {
+    this.logger.log(`METRIC: decryption_success keyId=${keyId}`);
+  }
+  ```
+  
+  Tracks successful decryption operations for auditing and performance analysis.
+  
+  Reference: encryption.service.ts:282-284
+</Accordion>
+
+<Accordion title="Decryption Failure Metrics">
+  ```typescript
+  private recordDecryptionFailureMetric(keyId: string, reason: string): void {
+    this.logger.log(
+      `METRIC: decryption_failure keyId=${keyId} reason=${reason}`
+    );
+  }
+  ```
+  
+  Tracks:
+  - Failed key ID
+  - Failure reason
+  - Timestamp
+  - Context information
+  
+  This enables detection of compromised keys or system issues.
+  
+  Reference: encryption.service.ts:286-290
+</Accordion>
+
+### Metrics Analysis
+
+The monitoring service provides comprehensive analytics:
+
+```typescript
+async generateMetricsSummary(timeframeHours: number = 24): Promise<any> {
+  const timeThreshold = new Date();
+  timeThreshold.setHours(timeThreshold.getHours() - timeframeHours);
+  
+  // Get total counts by operation and status
+  const metrics = await this.prismaService.$queryRaw`
+    SELECT 
+      operation, 
+      status, 
+      COUNT(*) as count,
+      AVG(duration) as avg_duration
+    FROM "EncryptionMetric"
+    WHERE timestamp >= ${timeThreshold}
+    GROUP BY operation, status
+  `;
+  
+  // Get failure rates
+  const failureRates = await this.prismaService.$queryRaw`
+    SELECT 
+      operation,
+      SUM(CASE WHEN status = 'failure' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) as failure_rate
+    FROM "EncryptionMetric"
+    WHERE timestamp >= ${timeThreshold}
+    GROUP BY operation
+  `;
+  
+  // Top failure reasons
+  const topFailures = await this.prismaService.$queryRaw`
+    SELECT 
+      operation,
+      "errorReason" AS reason,  
+      COUNT(*) AS count
+    FROM "EncryptionMetric"
+    WHERE status = 'failure' AND timestamp >= ${timeThreshold}
+    GROUP BY operation, "errorReason"
+    ORDER BY count DESC
+    LIMIT 10
+  `;
+  
+  return { metrics, failureRates, topFailures, timeframeHours };
+}
+```
+
+<Info>
+  Reference: encryption-monitoring.service.ts:52-106
+</Info>
+
+### GraphQL Metrics Query
+
+Access metrics through the GraphQL API:
+
+```graphql
+query GetMetrics {
+  getEncryptionMetricsSummary(timeframeHours: 24)
+}
+```
+
+<Info>
+  Reference: encryption.resolver.ts:96-103
+</Info>
+
+## Private Key Protection
+
+### Server-Side Only Access
+
+<Warning>
+  Private keys are **NEVER** exposed to clients. They remain secure on the server at all times.
+</Warning>
+
+```typescript
+/**
+ * Retrieves the private key for a given keyId
+ * Never exposes private key to clients
+ */
+private async getPrivateKey(keyId: string): Promise<string> {
+  // Private method - not accessible via API
+  const keyEntry = await this.prismaService.clientEncryptionKey.findUnique({
+    where: { id: keyId },
+  });
+  
+  return keyEntry.privateKey;
+}
+```
+
+<Info>
+  Reference: encryption.service.ts:100-130
+</Info>
+
+### Key Storage Security
+
+Private keys must be protected in the database:
+
+1. **Database Encryption at Rest**: Use database-level encryption (e.g., PostgreSQL TDE)
+2. **Access Control**: Restrict database access to authorized services only
+3. **Network Security**: Use TLS for all database connections
+4. **Audit Logging**: Log all database access to private key tables
+
+## Error Handling and Security
+
+### Secure Error Messages
+
+The service provides generic error messages to clients while logging detailed information:
+
+```typescript
+try {
+  const decryptedData = await decryptData(encryptedData, privateKey);
+  return decryptedData;
+} catch (error) {
+  // Log detailed error server-side
+  this.logger.error(`Decryption failed: ${error.message}`, error.stack);
+  this.recordDecryptionFailureMetric(keyId, error.message);
+  
+  // Return generic error to client
+  throw new Error('Failed to decrypt data');
+}
+```
+
+<Info>
+  Reference: encryption.service.ts:152-156
+</Info>
+
+This prevents information leakage that could aid attackers.
+
+## Security Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use TLS" icon="lock">
+    Always use HTTPS/TLS for API communications to prevent man-in-the-middle attacks
+  </Card>
+  <Card title="Rotate Keys" icon="rotate">
+    Follow the 30-day rotation policy to limit exposure from compromised keys
+  </Card>
+  <Card title="Monitor Metrics" icon="chart-line">
+    Regularly review encryption metrics to detect anomalies and security issues
+  </Card>
+  <Card title="Database Encryption" icon="database">
+    Enable encryption at rest for the database storing private keys
+  </Card>
+  <Card title="Rate Limiting" icon="gauge-high">
+    Configure throttling appropriate for your expected traffic patterns
+  </Card>
+  <Card title="Audit Logs" icon="file-lines">
+    Maintain comprehensive audit logs for compliance and forensics
+  </Card>
+</CardGroup>
+
+## Security Configuration
+
+### Environment Variables
+
+```bash
+# .env file
+
+# Encryption Configuration
+ENCRYPTION_KEY_ROTATION_DAYS=30
+ENCRYPTION_KEY_RETENTION_DAYS=90
+MAX_ENCRYPTED_DATA_SIZE=2048
+
+# Database Security
+DATABASE_URL=postgresql://user:pass@host:5432/db?sslmode=require
+
+# Rate Limiting (NestJS Throttler)
+THROTTLE_TTL=60
+THROTTLE_LIMIT=10
+```
+
+### Security Checklist
+
+- [ ] Enable database encryption at rest
+- [ ] Configure TLS for all network connections
+- [ ] Set appropriate rate limiting thresholds
+- [ ] Enable audit logging
+- [ ] Restrict database access to authorized services
+- [ ] Monitor encryption metrics regularly
+- [ ] Keep dependencies updated for security patches
+- [ ] Configure appropriate key rotation intervals
+- [ ] Set maximum encrypted data size limits
+- [ ] Implement network-level security (firewalls, VPC)
+
+## Threat Mitigation
+
+| Threat | Mitigation | Implementation |
+|--------|------------|----------------|
+| **DoS Attack** | Rate limiting | Max 5 keys per device per 24 hours |
+| **Expired Key Use** | Expiration validation | Checked on every decryption |
+| **Data Size Attack** | Size validation | 2048-byte limit enforced |
+| **Padding Oracle** | OAEP padding | RSA_PKCS1_OAEP_PADDING |
+| **Key Compromise** | Key rotation | 30-day expiration |
+| **Monitoring Blind Spots** | Comprehensive metrics | All operations logged |
+| **Failed Key Detection** | Failure rate analysis | 15% threshold triggers rotation |
+
+## Related Topics
+
+<CardGroup cols={2}>
+  <Card title="Encryption Keys" icon="key" href="/concepts/encryption-keys">
+    Learn about RSA key generation and cryptographic implementation
+  </Card>
+  <Card title="Key Rotation" icon="rotate" href="/concepts/key-rotation">
+    Understand automated rotation and lifecycle management
+  </Card>
+</CardGroup>

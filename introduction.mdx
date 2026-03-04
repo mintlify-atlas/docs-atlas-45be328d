@@ -1,0 +1,190 @@
+---
+title: Introduction to Key Management Service
+description: A secure GraphQL-based key management and encryption service built with NestJS, featuring automatic key rotation, rate limiting, and comprehensive monitoring
+---
+
+## Welcome to Key Management Service
+
+Key Management Service (KMS) is a production-ready GraphQL API that provides secure encryption key generation, management, and data encryption/decryption capabilities. Built on NestJS and powered by RSA-2048 encryption, it's designed for applications that need to encrypt sensitive user data on the client side.
+
+<CardGroup cols={2}>
+  <Card
+    title="Quick Start"
+    icon="rocket"
+    href="/quickstart"
+  >
+    Get up and running in 5 minutes with your first encryption key
+  </Card>
+  <Card
+    title="GraphQL API"
+    icon="code"
+    href="/api/overview"
+  >
+    Explore the complete GraphQL schema and operations
+  </Card>
+  <Card
+    title="Security Best Practices"
+    icon="shield"
+    href="/concepts/security"
+  >
+    Learn about encryption standards and security features
+  </Card>
+  <Card
+    title="Key Rotation"
+    icon="rotate"
+    href="/concepts/key-rotation"
+  >
+    Understand automatic key rotation and lifecycle management
+  </Card>
+</CardGroup>
+
+## Key Features
+
+### RSA-2048 Encryption
+
+The service uses industry-standard RSA encryption with 2048-bit keys, providing robust security for sensitive data encryption.
+
+```typescript
+// From src/lib/common/helpers/crypto.ts:19
+const { publicKey, privateKey } = await generateKeyPairAsync('rsa', {
+  modulusLength: 2048,
+  publicKeyEncoding: {
+    type: 'spki',
+    format: 'pem',
+  },
+  privateKeyEncoding: {
+    type: 'pkcs8',
+    format: 'pem',
+  },
+});
+```
+
+### Automatic Key Rotation
+
+Keys automatically expire after a configurable period (default: 30 days) and are rotated seamlessly. A scheduled task runs daily to deprecate expired keys and clean up old keys based on retention policies.
+
+<Info>
+  Keys are marked as deprecated but retained for a configurable period (default: 90 days) to ensure data can still be decrypted during the transition.
+</Info>
+
+### Rate Limiting & Security
+
+Built-in rate limiting prevents abuse with configurable limits per device:
+
+- Maximum 5 key generation requests per device per 24-hour window
+- Encrypted data size validation (default: 2048 bytes max)
+- Automatic key expiration enforcement
+
+```typescript
+// From src/encryption/encryption.service.ts:16
+private readonly MAX_KEY_GEN_PER_DEVICE = 5;
+private readonly KEY_GEN_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+```
+
+### Comprehensive Monitoring
+
+Track encryption operations with detailed metrics:
+
+- Key generation success/failure rates
+- Encryption and decryption performance
+- Device-level usage patterns
+- Automatic detection of problematic keys
+
+```graphql
+query {
+  getEncryptionMetricsSummary(timeframeHours: 24)
+}
+```
+
+## Architecture Overview
+
+The service is built with:
+
+- **NestJS** - Progressive Node.js framework
+- **GraphQL** (Apollo Server) - Type-safe API layer
+- **Prisma** - Type-safe database ORM
+- **PostgreSQL** - Robust data persistence
+- **Node.js Crypto** - Native encryption primitives
+
+### Core Components
+
+<CardGroup cols={3}>
+  <Card title="Encryption Module" icon="lock">
+    Handles key generation, encryption, and decryption operations
+  </Card>
+  <Card title="Auth Module" icon="key">
+    Manages encrypted passcode and transaction PIN verification
+  </Card>
+  <Card title="Key Rotation" icon="clock">
+    Automated scheduled tasks for key lifecycle management
+  </Card>
+</CardGroup>
+
+## Database Schema
+
+The service uses three main database models:
+
+**ClientEncryptionKey** - Stores encryption keys with metadata
+```prisma
+model ClientEncryptionKey {
+  id          String    @id
+  deviceId    String
+  appVersion  String?
+  publicKey   String
+  privateKey  String
+  expiresAt   DateTime?
+  deprecated  Boolean   @default(false)
+  usageCount  Int       @default(0)
+  lastUsed    DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([deviceId, deprecated, expiresAt])
+}
+```
+
+**EncryptionMetric** - Tracks operation metrics for monitoring
+```prisma
+model EncryptionMetric {
+  id            String    @id @default(uuid())
+  keyId         String?
+  deviceId      String?
+  operation     String    // "encrypt", "decrypt", "generate"
+  status        String    // "success", "failure"
+  errorReason   String?
+  duration      Int       // milliseconds
+  timestamp     DateTime  @default(now())
+}
+```
+
+<Note>
+  Private keys are stored securely in the database and never exposed to clients. Only public keys are returned to client applications.
+</Note>
+
+## Use Cases
+
+Key Management Service is ideal for:
+
+1. **Mobile & Web Applications** - Encrypt sensitive user data before transmission
+2. **Financial Services** - Secure transaction PINs and passcodes
+3. **Healthcare Apps** - Protect patient data with end-to-end encryption
+4. **Multi-device Apps** - Manage encryption keys per device
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card
+    title="Get Started"
+    icon="play"
+    href="/quickstart"
+  >
+    Follow the quickstart guide to make your first API call
+  </Card>
+  <Card
+    title="API Reference"
+    icon="book"
+    href="/api/overview"
+  >
+    Explore all available GraphQL mutations and queries
+  </Card>
+</CardGroup>

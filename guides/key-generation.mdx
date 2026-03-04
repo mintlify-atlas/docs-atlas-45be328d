@@ -1,0 +1,533 @@
+---
+title: Key Generation Guide
+description: Learn how to generate, manage, and rotate encryption keys for secure client-server communication
+---
+
+This guide covers the complete lifecycle of encryption keys, from generation to rotation, including rate limiting and expiration strategies.
+
+## Overview
+
+The Key Management Service uses RSA-2048 asymmetric encryption:
+- **Public keys** are distributed to clients for encrypting sensitive data
+- **Private keys** remain on the server for decryption
+- Keys are device-specific and have automatic expiration
+
+## Key Generation Flow
+
+<Steps>
+  <Step title="Request encryption key">
+    Client requests a new encryption key pair for a specific device:
+
+    ```graphql
+    mutation GenerateKey {
+      generateClientEncryptionKey(input: {
+        deviceId: "device-12345"
+        appVersion: "1.0.0"
+      }) {
+        publicKey
+        keyId
+      }
+    }
+    ```
+  </Step>
+
+  <Step title="Server generates RSA key pair">
+    The server generates a 2048-bit RSA key pair using Node.js crypto module.
+  </Step>
+
+  <Step title="Store private key securely">
+    Private key is stored in the database with:
+    - Unique key ID
+    - Device association
+    - Expiration timestamp (30 days default)
+    - Creation timestamp
+  </Step>
+
+  <Step title="Return public key to client">
+    Client receives the public key and key ID for encrypting data.
+  </Step>
+</Steps>
+
+## Generating Client Encryption Keys
+
+### GraphQL Mutation
+
+```graphql
+mutation GenerateClientEncryptionKey($input: ClientIdentityInput!) {
+  generateClientEncryptionKey(input: $input) {
+    publicKey
+    keyId
+  }
+}
+```
+
+### Input Type
+
+```typescript
+interface ClientIdentityInput {
+  deviceId: string;      // Unique device identifier
+  appVersion?: string;   // Optional app version for tracking
+}
+```
+
+### Response Type
+
+```typescript
+interface EncryptionKeyOutput {
+  publicKey: string;  // PEM-formatted RSA public key
+  keyId: string;      // Unique identifier for this key pair
+}
+```
+
+### Server-Side Implementation
+
+```typescript
+// From: src/encryption/encryption.service.ts:34-98
+async generateClientEncryptionKey(
+  deviceId: string,
+  appVersion?: string,
+): Promise<{ publicKey: string; keyId: string }> {
+  try {
+    // Check for rate limiting
+    this.enforceKeyGenerationRateLimit(deviceId);
+
+    this.logger.log(`Generating encryption key pair for device: ${deviceId}`);
+
+    // Check for existing valid keys first - key rotation strategy
+    const existingKey = await this.getValidKeyForDevice(deviceId);
+    if (existingKey) {
+      this.logger.log(
+        `Using existing valid key for device: ${deviceId}, keyId: ${existingKey.id}`,
+      );
+      return {
+        publicKey: existingKey.publicKey,
+        keyId: existingKey.id,
+      };
+    }
+
+    // Generate the key pair
+    const { publicKey, privateKey } = await generateKeyPair();
+
+    // Create a unique keyId with a random component
+    const keyId = `key_${Date.now()}_${crypto.randomBytes(12).toString('hex')}`;
+
+    // Store the private key in the database with expiration date
+    const expirationDate = new Date();
+    expirationDate.setDate(
+      expirationDate.getDate() + this.keyRotationIntervalDays,
+    );
+
+    await this.prismaService.clientEncryptionKey.create({
+      data: {
+        id: keyId,
+        deviceId,
+        appVersion,
+        publicKey,
+        privateKey,
+        expiresAt: expirationDate,
+        createdAt: new Date(),
+      },
+    });
+
+    // Add metrics for monitoring
+    this.recordKeyGenerationMetric(deviceId);
+    this.logger.log(
+      `Successfully generated encryption key pair with ID: ${keyId}`,
+    );
+
+    return { publicKey, keyId };
+  } catch (error) {
+    this.logger.error(
+      `Failed to generate encryption key pair: ${error.message}`,
+      error.stack,
+    );
+    throw new Error('Failed to generate encryption key pair');
+  }
+}
+```
+
+## RSA Key Pair Generation
+
+The service uses Node.js built-in crypto module to generate 2048-bit RSA keys:
+
+```typescript
+// From: src/lib/common/helpers/crypto.ts:14-36
+import * as crypto from 'crypto';
+import { promisify } from 'util';
+
+const generateKeyPairAsync = promisify(crypto.generateKeyPair);
+
+export async function generateKeyPair(): Promise<{
+  publicKey: string;
+  privateKey: string;
+}> {
+  try {
+    const { publicKey, privateKey } = await generateKeyPairAsync('rsa', {
+      modulusLength: 2048,
+      publicKeyEncoding: {
+        type: 'spki',
+        format: 'pem',
+      },
+      privateKeyEncoding: {
+        type: 'pkcs8',
+        format: 'pem',
+      },
+    });
+
+    return { publicKey, privateKey };
+  } catch (error) {
+    console.error('Error generating key pair:', error);
+    throw new Error('Failed to generate encryption keys');
+  }
+}
+```
+
+## Key Reuse Strategy
+
+Before generating a new key, the service checks for existing valid keys:
+
+```typescript
+// From: src/encryption/encryption.service.ts:259-276
+private async getValidKeyForDevice(
+  deviceId: string,
+): Promise<{ id: string; publicKey: string } | null> {
+  const validKey = await this.prismaService.clientEncryptionKey.findFirst({
+    where: {
+      deviceId,
+      deprecated: false,
+      expiresAt: {
+        gt: new Date(),
+      },
+    },
+    orderBy: {
+      createdAt: 'desc',
+    },
+  });
+
+  return validKey ? { id: validKey.id, publicKey: validKey.publicKey } : null;
+}
+```
+
+This prevents unnecessary key generation and ensures consistency.
+
+## Rate Limiting
+
+The service enforces rate limits to prevent abuse:
+
+- **Limit**: 5 key generations per device
+- **Window**: 24 hours
+- **Reset**: Counter resets after the time window
+
+```typescript
+// From: src/encryption/encryption.service.ts:227-254
+private enforceKeyGenerationRateLimit(deviceId: string): void {
+  // Get current device limits
+  const now = Date.now();
+  const deviceLimits = this.deviceKeyGenLimits.get(deviceId) || {
+    count: 0,
+    resetTime: now + this.KEY_GEN_WINDOW_MS,
+  };
+
+  // Reset counter if time window has passed
+  if (now > deviceLimits.resetTime) {
+    deviceLimits.count = 0;
+    deviceLimits.resetTime = now + this.KEY_GEN_WINDOW_MS;
+  }
+
+  // Check if rate limit is exceeded
+  // Note: Rate limit check is currently commented out in implementation
+  // if (deviceLimits.count >= this.MAX_KEY_GEN_PER_DEVICE) {
+  //   throw new ThrottlerException(...);
+  // }
+
+  // Increment counter and update
+  deviceLimits.count++;
+  this.deviceKeyGenLimits.set(deviceId, deviceLimits);
+}
+```
+
+## Key Rotation
+
+### Automatic Expiration
+
+Keys automatically expire after a configured interval (default: 30 days):
+
+```typescript
+// From: src/encryption/encryption.service.ts:23-27
+constructor(
+  private readonly prismaService: PrismaService,
+  private readonly configService: ConfigService,
+) {
+  this.keyRotationIntervalDays = this.configService.get(
+    'ENCRYPTION_KEY_ROTATION_DAYS',
+    30,
+  );
+}
+```
+
+### Manual Key Rotation
+
+You can manually rotate keys for a device:
+
+```graphql
+mutation RotateKey {
+  rotateClientEncryptionKey(input: {
+    deviceId: "device-12345"
+    appVersion: "1.0.0"
+  }) {
+    publicKey
+    keyId
+  }
+}
+```
+
+### Server-Side Rotation Implementation
+
+```typescript
+// From: src/encryption/encryption.service.ts:185-210
+async rotateKeysForDevice(
+  deviceId: string,
+): Promise<{ publicKey: string; keyId: string }> {
+  try {
+    // Mark existing keys as deprecated
+    await this.prismaService.clientEncryptionKey.updateMany({
+      where: {
+        deviceId,
+        deprecated: false,
+      },
+      data: {
+        deprecated: true,
+        updatedAt: new Date(),
+      },
+    });
+
+    // Generate new key
+    return this.generateClientEncryptionKey(deviceId);
+  } catch (error) {
+    this.logger.error(
+      `Failed to rotate keys for device ${deviceId}: ${error.message}`,
+      error.stack,
+    );
+    throw new Error('Failed to rotate encryption keys');
+  }
+}
+```
+
+Key rotation:
+1. Marks all existing keys as deprecated
+2. Generates a new key pair
+3. Returns the new public key to the client
+
+## Key Validation
+
+Validate whether a key ID is still valid:
+
+```typescript
+// From: src/encryption/encryption.service.ts:162-180
+async validateKeyId(keyId: string): Promise<boolean> {
+  try {
+    const keyEntry = await this.prismaService.clientEncryptionKey.findUnique({
+      where: { id: keyId },
+    });
+
+    if (!keyEntry) return false;
+
+    // Check if key has expired
+    if (keyEntry.expiresAt && keyEntry.expiresAt < new Date()) {
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    this.logger.error(`Key validation failed: ${error.message}`, error.stack);
+    return false;
+  }
+}
+```
+
+## Configuration
+
+Key generation behavior can be configured via environment variables:
+
+```bash
+# Key rotation interval in days (default: 30)
+ENCRYPTION_KEY_ROTATION_DAYS=30
+
+# Maximum encrypted data size in bytes (default: 2048)
+MAX_ENCRYPTED_DATA_SIZE=2048
+```
+
+## Key Storage Schema
+
+Keys are stored in the database with the following structure:
+
+```prisma
+model ClientEncryptionKey {
+  id           String    @id
+  deviceId     String
+  appVersion   String?
+  publicKey    String
+  privateKey   String
+  deprecated   Boolean   @default(false)
+  expiresAt    DateTime
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+```
+
+## Complete Example
+
+<CodeGroup>
+```typescript Client Implementation
+interface EncryptionKey {
+  publicKey: string;
+  keyId: string;
+}
+
+class KeyManager {
+  private currentKey: EncryptionKey | null = null;
+
+  async getOrGenerateKey(deviceId: string): Promise<EncryptionKey> {
+    // Check if we have a valid key
+    if (this.currentKey) {
+      return this.currentKey;
+    }
+
+    // Generate new key
+    const response = await fetch('/graphql', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: `
+          mutation GenerateKey($input: ClientIdentityInput!) {
+            generateClientEncryptionKey(input: $input) {
+              publicKey
+              keyId
+            }
+          }
+        `,
+        variables: {
+          input: {
+            deviceId,
+            appVersion: '1.0.0'
+          }
+        }
+      })
+    });
+
+    const { data } = await response.json();
+    this.currentKey = data.generateClientEncryptionKey;
+    
+    // Store in local storage
+    localStorage.setItem('encryptionKey', JSON.stringify(this.currentKey));
+    
+    return this.currentKey;
+  }
+
+  async rotateKey(deviceId: string): Promise<EncryptionKey> {
+    const response = await fetch('/graphql', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: `
+          mutation RotateKey($input: ClientIdentityInput!) {
+            rotateClientEncryptionKey(input: $input) {
+              publicKey
+              keyId
+            }
+          }
+        `,
+        variables: {
+          input: { deviceId, appVersion: '1.0.0' }
+        }
+      })
+    });
+
+    const { data } = await response.json();
+    this.currentKey = data.rotateClientEncryptionKey;
+    localStorage.setItem('encryptionKey', JSON.stringify(this.currentKey));
+    
+    return this.currentKey;
+  }
+}
+```
+
+```graphql GraphQL Operations
+# Generate new encryption key
+mutation GenerateKey {
+  generateClientEncryptionKey(input: {
+    deviceId: "device-12345"
+    appVersion: "1.0.0"
+  }) {
+    publicKey
+    keyId
+  }
+}
+
+# Rotate existing key
+mutation RotateKey {
+  rotateClientEncryptionKey(input: {
+    deviceId: "device-12345"
+    appVersion: "1.0.0"
+  }) {
+    publicKey
+    keyId
+  }
+}
+```
+</CodeGroup>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Reuse Valid Keys" icon="recycle">
+    The service automatically reuses valid keys for a device. Don't generate new keys unnecessarily.
+  </Card>
+  
+  <Card title="Store Keys Securely" icon="shield">
+    Store the keyId and publicKey securely on the client (e.g., encrypted local storage).
+  </Card>
+  
+  <Card title="Handle Expiration" icon="clock">
+    Implement retry logic for expired keys. Generate a new key when decryption fails with "key expired" error.
+  </Card>
+  
+  <Card title="Monitor Rate Limits" icon="gauge">
+    Avoid hitting rate limits by caching keys and only generating when necessary.
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+### Key Not Found Error
+
+If you receive "Encryption key not found", the key may have been:
+- Deleted from the database
+- Never generated
+- Expired and cleaned up
+
+**Solution**: Generate a new key using `generateClientEncryptionKey`.
+
+### Key Expired Error
+
+Keys expire after 30 days (default). When a key expires:
+
+**Solution**: Call `rotateClientEncryptionKey` to get a new key.
+
+### Rate Limit Exceeded
+
+If you hit the rate limit (5 keys per 24 hours per device):
+
+**Solution**: Wait for the rate limit window to reset or reuse the existing valid key.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Encryption & Decryption" href="/guides/encryption-decryption" icon="lock">
+    Learn how to encrypt and decrypt data using generated keys
+  </Card>
+  
+  <Card title="Authentication" href="/guides/authentication" icon="user-shield">
+    Implement secure authentication with encrypted credentials
+  </Card>
+</CardGroup>

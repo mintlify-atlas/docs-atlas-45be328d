@@ -1,0 +1,110 @@
+---
+title: 'GraphQL API Overview'
+description: 'Learn how to interact with the Key Management Service GraphQL API'
+---
+
+## GraphQL Endpoint
+
+The Key Management Service exposes a GraphQL API endpoint:
+
+```
+POST http://localhost:3000/graphql
+```
+
+All GraphQL requests should be sent to this endpoint using the POST method with a JSON payload containing your query or mutation.
+
+## Schema Overview
+
+The API provides two main categories of operations:
+
+- **Encryption Operations**: Generate and rotate encryption keys, encrypt data, and retrieve metrics
+- **Authentication Operations**: Set and verify user passcodes and transaction PINs
+
+## Making Requests
+
+### Request Format
+
+All GraphQL requests follow this structure:
+
+```json
+{
+  "query": "mutation { ... }" or "query { ... }",
+  "variables": {
+    // Optional variables
+  }
+}
+```
+
+### Example Request
+
+Here's an example of generating a client encryption key:
+
+```bash
+curl -X POST http://localhost:3000/graphql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "mutation GenerateKey($input: ClientIdentityInput!) { generateClientEncryptionKey(input: $input) { publicKey keyId } }",
+    "variables": {
+      "input": {
+        "deviceId": "device-123",
+        "appVersion": "1.0.0"
+      }
+    }
+  }'
+```
+
+### Response Format
+
+Successful responses return data in this format:
+
+```json
+{
+  "data": {
+    "generateClientEncryptionKey": {
+      "publicKey": "-----BEGIN PUBLIC KEY-----...",
+      "keyId": "key-abc-123"
+    }
+  }
+}
+```
+
+### Error Handling
+
+Errors are returned in the GraphQL standard format:
+
+```json
+{
+  "errors": [
+    {
+      "message": "Error description",
+      "locations": [{ "line": 1, "column": 10 }],
+      "path": ["generateClientEncryptionKey"]
+    }
+  ]
+}
+```
+
+## Schema Introspection
+
+The GraphQL API supports introspection. You can query the schema to discover available types, queries, and mutations:
+
+```graphql
+query {
+  __schema {
+    types {
+      name
+      kind
+      description
+    }
+  }
+}
+```
+
+## Rate Limiting
+
+The API implements rate limiting through throttler guards to protect against abuse. If you exceed rate limits, you'll receive an appropriate error response.
+
+## Next Steps
+
+- Explore [Encryption Operations](/api/encryption) for key management and data encryption
+- Learn about [Authentication Operations](/api/authentication) for passcode and PIN management

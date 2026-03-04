@@ -1,0 +1,200 @@
+---
+title: "Rate Limits"
+description: "Understand rate limiting for key generation to prevent abuse and ensure service stability"
+---
+
+The Key Management Service implements rate limiting for encryption key generation to prevent abuse and ensure service availability. Rate limits are enforced per device ID using an in-memory counter with a sliding time window.
+
+## Key Generation Rate Limits
+
+Rate limits are applied to the `POST /api/encryption/keys` endpoint to control how frequently a device can request new encryption keys.
+
+### Configuration
+
+<ParamField path="MAX_KEY_GEN_PER_DEVICE" type="number" default="5">
+  Maximum number of key generation requests allowed per device within the time window.
+  
+  **Implementation:** `src/encryption/encryption.service.ts:16`
+  
+  ```typescript
+  private readonly MAX_KEY_GEN_PER_DEVICE = 5;
+  ```
+  
+  <Note>
+    This is currently a hardcoded constant. To make it configurable via environment variables, you would need to load it through ConfigService.
+  </Note>
+</ParamField>
+
+<ParamField path="KEY_GEN_WINDOW_MS" type="number" default="86400000">
+  Time window in milliseconds for rate limit enforcement (24 hours by default).
+  
+  **Implementation:** `src/encryption/encryption.service.ts:17`
+  
+  ```typescript
+  private readonly KEY_GEN_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+  ```
+  
+  **Calculation:**
+  - 24 hours × 60 minutes × 60 seconds × 1000 milliseconds = 86,400,000 ms
+</ParamField>
+
+## Rate Limiting Logic
+
+The rate limiting is implemented with a per-device counter that tracks requests within a sliding window:
+
+```typescript
+// src/encryption/encryption.service.ts:227-254
+private enforceKeyGenerationRateLimit(deviceId: string): void {
+  // Get current device limits
+  const now = Date.now();
+  const deviceLimits = this.deviceKeyGenLimits.get(deviceId) || {
+    count: 0,
+    resetTime: now + this.KEY_GEN_WINDOW_MS,
+  };
+
+  // Reset counter if time window has passed
+  if (now > deviceLimits.resetTime) {
+    deviceLimits.count = 0;
+    deviceLimits.resetTime = now + this.KEY_GEN_WINDOW_MS;
+  }
+
+  // Check if rate limit is exceeded (currently commented out)
+  // if (deviceLimits.count >= this.MAX_KEY_GEN_PER_DEVICE) {
+  //   const resetInMs = deviceLimits.resetTime - now;
+  //   const resetInMinutes = Math.ceil(resetInMs / (60 * 1000));
+  //   this.logger.warn(`Rate limit exceeded for key generation: ${deviceId}`);
+  //   throw new ThrottlerException(
+  //     `Rate limit for key generation exceeded. Try again in ${resetInMinutes} minutes.`,
+  //   );
+  // }
+
+  // Increment counter and update
+  deviceLimits.count++;
+  this.deviceKeyGenLimits.set(deviceId, deviceLimits);
+}
+```
+
+<Warning>
+  The rate limit check is currently commented out in the code. While the counting logic is active, no ThrottlerException is thrown when limits are exceeded. To enforce rate limits, uncomment lines 242-249 in `src/encryption/encryption.service.ts`.
+</Warning>
+
+## Behavior
+
+### Current Behavior (Tracking Only)
+
+1. Each key generation request increments the device's counter
+2. Counter resets automatically after 24 hours
+3. No requests are blocked (enforcement is disabled)
+4. Metrics are collected for monitoring
+
+### When Enforcement Is Enabled
+
+1. **First Request:** Counter starts at 1, reset time set to now + 24 hours
+2. **Subsequent Requests:** Counter increments with each request
+3. **At Limit (5 requests):** Returns error response
+4. **After 24 Hours:** Counter resets to 0, requests allowed again
+
+### Example Timeline
+
+```
+10:00 AM - Request 1: Allowed (count: 1/5)
+11:00 AM - Request 2: Allowed (count: 2/5)
+12:00 PM - Request 3: Allowed (count: 3/5)
+01:00 PM - Request 4: Allowed (count: 4/5)
+02:00 PM - Request 5: Allowed (count: 5/5)
+03:00 PM - Request 6: Blocked (limit exceeded)
+10:01 AM (next day) - Counter resets
+10:01 AM - Request 7: Allowed (count: 1/5)
+```
+
+## Error Response
+
+When rate limits are exceeded (if enforcement is enabled), the API returns:
+
+**Status Code:** `429 Too Many Requests`
+
+**Response Body:**
+```json
+{
+  "statusCode": 429,
+  "message": "Rate limit for key generation exceeded. Try again in X minutes.",
+  "error": "Too Many Requests"
+}
+```
+
+The response includes the estimated time in minutes until the rate limit window resets.
+
+## Key Reuse Strategy
+
+The service implements an intelligent key reuse strategy to reduce unnecessary key generation:
+
+```typescript
+// src/encryption/encryption.service.ts:45-54
+const existingKey = await this.getValidKeyForDevice(deviceId);
+if (existingKey) {
+  this.logger.log(
+    `Using existing valid key for device: ${deviceId}, keyId: ${existingKey.id}`,
+  );
+  return {
+    publicKey: existingKey.publicKey,
+    keyId: existingKey.id,
+  };
+}
+```
+
+**Benefits:**
+- Reduces database writes
+- Prevents rate limit exhaustion from repeated requests
+- Returns existing valid keys instead of generating new ones
+- Keys are only generated when no valid key exists
+
+## Implementation Notes
+
+### In-Memory Storage
+
+Rate limit counters are stored in a Map object in memory:
+
+```typescript
+private readonly deviceKeyGenLimits: Map<
+  string,
+  { count: number; resetTime: number }
+> = new Map();
+```
+
+<Warning>
+  **Important Limitations:**
+  - Counters are lost on service restart
+  - Each service instance maintains its own counters
+  - Not suitable for multi-instance deployments without external rate limiting
+  
+  For production multi-instance deployments, consider:
+  - Redis-backed rate limiting (e.g., using `@nestjs/throttler` with Redis)
+  - API Gateway rate limiting
+  - Load balancer rate limiting
+</Warning>
+
+### Enabling Rate Limit Enforcement
+
+To enable rate limit enforcement, uncomment the check in `src/encryption/encryption.service.ts:242-249`:
+
+```typescript
+// Change from:
+// if (deviceLimits.count >= this.MAX_KEY_GEN_PER_DEVICE) {
+//   ...
+// }
+
+// To:
+if (deviceLimits.count >= this.MAX_KEY_GEN_PER_DEVICE) {
+  const resetInMs = deviceLimits.resetTime - now;
+  const resetInMinutes = Math.ceil(resetInMs / (60 * 1000));
+  this.logger.warn(`Rate limit exceeded for key generation: ${deviceId}`);
+  throw new ThrottlerException(
+    `Rate limit for key generation exceeded. Try again in ${resetInMinutes} minutes.`,
+  );
+}
+```
+
+## Related Documentation
+
+- [Environment Variables](/api/environment-variables) - Configuration options
+- [Encryption Operations](/api/encryption) - Key generation endpoint
