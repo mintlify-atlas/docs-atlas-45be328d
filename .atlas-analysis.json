@@ -1,0 +1,80 @@
+{
+  "projectType": "api-service",
+  "projectName": "Key Management Service",
+  "projectDescription": "A secure GraphQL API for client-side encryption key management with automated rotation and monitoring",
+  "theme": "aspen",
+  "primaryColor": "#2563eb",
+  "lightColor": "#3b82f6",
+  "darkColor": "#1e40af",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/encryption-keys",
+              "concepts/key-rotation",
+              "concepts/security"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/authentication",
+              "guides/key-generation",
+              "guides/encryption-decryption",
+              "guides/monitoring"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "GraphQL API",
+            "pages": [
+              "api/overview",
+              "api/encryption",
+              "api/authentication"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "api/environment-variables",
+              "api/rate-limits"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "RSA key pair generation for client-side encryption",
+    "Automated key rotation with configurable expiration",
+    "Secure passcode and transaction PIN management",
+    "GraphQL API with rate limiting and throttling",
+    "Encryption metrics and monitoring",
+    "Scheduled cleanup of expired keys"
+  ],
+  "publicApiSurface": [
+    "generateClientEncryptionKey",
+    "rotateClientEncryptionKey",
+    "encryptDataLikeClient",
+    "getEncryptionMetricsSummary",
+    "setUserPasscode",
+    "verifyUserPasscode",
+    "setTransactionPin",
+    "verifyTransactionPin"
+  ]
+}
